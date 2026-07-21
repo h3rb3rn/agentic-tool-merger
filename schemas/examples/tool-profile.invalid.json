@@ -1,0 +1,20 @@
+{
+  "apiVersion": "sessionmesh.dev/v2",
+  "kind": "ExecutableScript",
+  "metadata": {
+    "name": "Invalid Profile",
+    "displayName": "",
+    "family": "unknown",
+    "surface": "cli"
+  },
+  "spec": {
+    "sources": [],
+    "capabilities": {
+      "observe": true
+    },
+    "ingestion": {
+      "mode": "execute",
+      "debounceMs": -1
+    }
+  }
+}

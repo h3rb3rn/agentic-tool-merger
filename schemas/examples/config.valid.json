@@ -1,0 +1,20 @@
+{
+  "home": "/var/lib/sessionmesh",
+  "bind_address": "127.0.0.1",
+  "port": 8787,
+  "allow_network": false,
+  "database_path": "/var/lib/sessionmesh/sessionmesh.db",
+  "blob_store_path": "/var/lib/sessionmesh/blobs",
+  "watch_debounce_ms": 750,
+  "redaction_enabled": true,
+  "llm_endpoint": "http://127.0.0.1:11434/v1",
+  "model": "local-extractor",
+  "token_budget": 4000,
+  "correlation_threshold": 0.8,
+  "source_mappings": [
+    {
+      "readable_path": "/sources/codex",
+      "original_path": "~/.codex"
+    }
+  ]
+}

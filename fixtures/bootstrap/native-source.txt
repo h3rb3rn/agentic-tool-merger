@@ -1,0 +1,1 @@
+This fixture represents a native agent source that SessionMesh must not modify.

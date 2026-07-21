@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sessionmesh.dev/schemas/canonical-event/1.0",
+  "title": "SessionMesh Canonical Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "tool",
+    "native_session_id",
+    "sequence",
+    "timestamp",
+    "timestamp_precision",
+    "kind",
+    "payload",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "event_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "surface", "profile"],
+      "properties": {
+        "family": { "type": "string", "minLength": 1 },
+        "surface": { "type": "string", "minLength": 1 },
+        "profile": { "type": "string", "minLength": 1 }
+      }
+    },
+    "native_session_id": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "timestamp_precision": {
+      "enum": ["unknown", "second", "millisecond", "microsecond", "nanosecond"]
+    },
+    "kind": {
+      "enum": [
+        "user_message",
+        "assistant_message",
+        "system_message",
+        "tool_call",
+        "tool_result",
+        "file_read",
+        "file_write",
+        "patch",
+        "shell_command",
+        "command_result",
+        "git_state",
+        "plan",
+        "task",
+        "decision",
+        "checkpoint",
+        "compaction",
+        "error",
+        "subagent_spawn",
+        "session_start",
+        "session_end",
+        "unknown"
+      ]
+    },
+    "workspace": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "cwd": { "type": ["string", "null"] },
+        "repository_id": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] },
+        "head": { "type": ["string", "null"] }
+      }
+    },
+    "payload": { "type": "object" },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_path",
+        "source_offset",
+        "source_generation",
+        "adapter_version",
+        "ingestion_sequence"
+      ],
+      "properties": {
+        "source_path": { "type": "string", "minLength": 1 },
+        "original_path": { "type": ["string", "null"] },
+        "source_offset": { "type": "integer", "minimum": 0 },
+        "source_generation": { "type": "string", "minLength": 1 },
+        "adapter_version": { "type": "string", "minLength": 1 },
+        "ingestion_sequence": { "type": "integer", "minimum": 0 },
+        "ordering_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    }
+  }
+}

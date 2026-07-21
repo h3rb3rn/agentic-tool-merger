@@ -1,0 +1,16 @@
+[package]
+name = "sessionmesh-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sessionmesh-core = { path = "../sessionmesh-core" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "sessionmesh"
+path = "src/main.rs"

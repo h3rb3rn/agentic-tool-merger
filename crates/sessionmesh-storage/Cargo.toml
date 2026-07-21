@@ -1,0 +1,19 @@
+[package]
+name = "sessionmesh-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+sessionmesh-core = { path = "../sessionmesh-core" }
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

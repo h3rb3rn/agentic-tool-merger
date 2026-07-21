@@ -1,0 +1,15 @@
+{
+  "schema_version": "2.0",
+  "event_id": "not-deterministic",
+  "tool": {
+    "family": "codex",
+    "surface": "cli",
+    "profile": "default"
+  },
+  "native_session_id": "example",
+  "sequence": -1,
+  "timestamp": "not-a-timestamp",
+  "kind": "invented_kind",
+  "payload": {},
+  "provenance": {}
+}

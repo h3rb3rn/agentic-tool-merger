@@ -1,0 +1,50 @@
+[workspace]
+members = [
+  "crates/sessionmesh-acp",
+  "crates/sessionmesh-adapter-sdk",
+  "crates/sessionmesh-api",
+  "crates/sessionmesh-cli",
+  "crates/sessionmesh-core",
+  "crates/sessionmesh-correlator",
+  "crates/sessionmesh-daemon",
+  "crates/sessionmesh-handoff",
+  "crates/sessionmesh-ingest",
+  "crates/sessionmesh-mcp",
+  "crates/sessionmesh-storage",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/h3rb3rn/agentic-tool-merger"
+
+[workspace.dependencies]
+async-trait = "0.1.89"
+async-stream = "0.3.6"
+axum = "0.8.4"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+futures-core = "0.3.31"
+getrandom = "0.3.4"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.11.0"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+tempfile = "3.27.0"
+tokio = { version = "1.53.0", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+tower = "0.5.2"
+tower-http = { version = "0.6.8", features = ["fs"] }
+toml = "1.1.2"
+url = "2.5.8"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"

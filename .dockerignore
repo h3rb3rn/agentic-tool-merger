@@ -1,0 +1,10 @@
+.git
+.sessionmesh
+node_modules
+**/node_modules
+target
+**/target
+site
+**/dist
+.env
+.env.*

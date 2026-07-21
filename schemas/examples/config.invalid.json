@@ -1,0 +1,10 @@
+{
+  "bind_address": "everywhere",
+  "port": 70000,
+  "allow_network": "sometimes",
+  "watch_debounce_ms": -1,
+  "embedding_endpoint": "file:///tmp/model",
+  "token_budget": 0,
+  "correlation_threshold": 1.5,
+  "unknown_setting": true
+}

@@ -1,0 +1,27 @@
+{
+  "name": "sessionmesh",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @sessionmesh/web",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
+    "dev": "npm run dev --workspace @sessionmesh/web",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "npm run lint --workspace @sessionmesh/web",
+    "test": "node --test scripts/*.test.mjs && npm run test --workspace @sessionmesh/web",
+    "typecheck": "npm run typecheck --workspace @sessionmesh/web"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "prettier": "3.6.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

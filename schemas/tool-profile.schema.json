@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sessionmesh.dev/schemas/tool-profile/v1alpha1",
+  "title": "SessionMesh Tool Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": { "const": "sessionmesh.dev/v1alpha1" },
+    "kind": { "const": "ToolProfile" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "displayName", "family", "surface"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "displayName": { "type": "string", "minLength": 1 },
+        "family": { "type": "string", "minLength": 1 },
+        "surface": { "type": "string", "minLength": 1 }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sources", "capabilities", "ingestion"],
+      "properties": {
+        "detection": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "executables": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            },
+            "configPaths": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            }
+          }
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "type", "paths"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "type": {
+                "enum": [
+                  "jsonl",
+                  "json",
+                  "sqlite",
+                  "markdown",
+                  "directory",
+                  "command-json",
+                  "http",
+                  "sse",
+                  "acp",
+                  "manual-export"
+                ]
+              },
+              "paths": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "recursive": { "type": "boolean" },
+              "include": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["observe", "inject"],
+          "properties": {
+            "observe": { "type": "boolean" },
+            "inject": { "type": "boolean" },
+            "resume": { "type": "boolean" },
+            "fork": { "type": "boolean" },
+            "compact": { "type": "boolean" },
+            "mcp": { "type": "boolean" },
+            "acp": { "type": "boolean" },
+            "hooks": { "type": "boolean" }
+          }
+        },
+        "ingestion": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "debounceMs"],
+          "properties": {
+            "mode": { "enum": ["scan", "watch"] },
+            "debounceMs": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
+  }
+}

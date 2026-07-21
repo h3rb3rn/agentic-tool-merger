@@ -1,0 +1,16 @@
+{
+  "session_id": "session-fixture",
+  "kinds": [
+    "session_start",
+    "user_message",
+    "assistant_message",
+    "tool_call",
+    "tool_result",
+    "compaction",
+    "unknown"
+  ],
+  "tool_result_call_id": "call-1",
+  "tool_result_matched": true,
+  "sensitive_pointer": "/payload/api_key",
+  "malformed_records": 1
+}

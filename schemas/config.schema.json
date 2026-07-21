@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sessionmesh.dev/schemas/config/1.0",
+  "title": "SessionMesh Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "home": { "$ref": "#/$defs/path" },
+    "bind_address": {
+      "type": "string",
+      "anyOf": [{ "format": "ipv4" }, { "format": "ipv6" }]
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "allow_network": { "type": "boolean" },
+    "database_path": { "$ref": "#/$defs/path" },
+    "blob_store_path": { "$ref": "#/$defs/path" },
+    "watch_debounce_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 60000
+    },
+    "redaction_enabled": { "type": "boolean" },
+    "embedding_endpoint": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https?://"
+    },
+    "llm_endpoint": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https?://"
+    },
+    "model": { "type": "string", "minLength": 1 },
+    "token_budget": { "type": "integer", "minimum": 1 },
+    "correlation_threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "source_mappings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["readable_path", "original_path"],
+        "properties": {
+          "readable_path": { "$ref": "#/$defs/path" },
+          "original_path": { "$ref": "#/$defs/path" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "apiVersion": "sessionmesh.dev/v1alpha1",
+  "kind": "ToolProfile",
+  "metadata": {
+    "name": "continue-cli",
+    "displayName": "Continue CLI",
+    "family": "continue",
+    "surface": "cli"
+  },
+  "spec": {
+    "detection": {
+      "executables": ["cn"],
+      "configPaths": ["~/.continue/config.yaml"]
+    },
+    "sources": [
+      {
+        "id": "session-store",
+        "type": "directory",
+        "paths": ["~/.continue"],
+        "recursive": true,
+        "include": ["**/*.json", "**/*.jsonl", "**/*.db", "**/*.sqlite"]
+      }
+    ],
+    "capabilities": {
+      "observe": true,
+      "inject": true,
+      "resume": true,
+      "fork": true,
+      "compact": true,
+      "mcp": true,
+      "acp": false,
+      "hooks": false
+    },
+    "ingestion": {
+      "mode": "watch",
+      "debounceMs": 750
+    }
+  }
+}

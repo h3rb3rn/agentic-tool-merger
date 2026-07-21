@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0",
+  "event_id": "sha256:a153271f13e4b47901af4cc07ae71d81e28da6c2fe17200a2fe4411da807d533",
+  "tool": {
+    "family": "codex",
+    "surface": "cli",
+    "profile": "default"
+  },
+  "native_session_id": "019e17c0-example",
+  "sequence": 42,
+  "timestamp": "2026-07-20T14:31:22.192Z",
+  "timestamp_precision": "millisecond",
+  "kind": "tool_result",
+  "workspace": {
+    "cwd": "/workspace/sessionmesh",
+    "repository_id": "repo_example",
+    "branch": "main",
+    "head": "a218df4"
+  },
+  "payload": {
+    "tool_name": "shell",
+    "exit_code": 0,
+    "stdout_blob": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "provenance": {
+    "source_path": "/sources/codex/sessions/rollout-example.jsonl",
+    "original_path": "~/.codex/sessions/rollout-example.jsonl",
+    "source_offset": 17428,
+    "source_generation": "dev-104:inode-72",
+    "adapter_version": "0.1.0",
+    "ingestion_sequence": 108,
+    "ordering_confidence": 1
+  }
+}

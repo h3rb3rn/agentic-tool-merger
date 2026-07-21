@@ -1,0 +1,50 @@
+# Rust
+/target/
+
+# Node
+/node_modules/
+**/node_modules/
+**/dist/
+coverage/
+*.tsbuildinfo
+
+# Documentation
+/site/
+
+# Environment and local state
+.env
+.env.*
+!.env.example
+.envrc
+/.sessionmesh/
+/data/
+/secrets/
+/config.local.*
+/settings.local.*
+/credentials.*
+/api-token
+/sessionmesh.local.toml
+/sessionmesh.local.yaml
+/sessionmesh.local.yml
+/sessionmesh.local.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.token
+auth.json
+credentials.json
+
+# Local runtime databases and journals
+/*.db
+/*.db-shm
+/*.db-wal
+/*.sqlite
+/*.sqlite-shm
+/*.sqlite-wal
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
