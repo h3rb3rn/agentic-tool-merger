@@ -101,7 +101,8 @@ Important variables:
 | `SESSIONMESH_MODEL`                 | empty                              | Optional local model identifier    |
 | `SESSIONMESH_TOKEN_BUDGET`          | `4000`                             | Maximum handoff budget             |
 | `SESSIONMESH_CORRELATION_THRESHOLD` | `0.8`                              | Automatic-link threshold           |
-| `CODEX_HOME`                        | `${HOME}/.codex`                   | Native/host Codex source           |
+| `SESSIONMESH_AGENT_HOME`            | `${HOME}`                          | Read-only host agent-profile root  |
+| `CODEX_HOME`                        | `$HOME/.codex`                     | Native Codex source outside OCI    |
 
 The complete precedence, validation, and path-expansion contract is documented
 in [Configuration](docs/development/configuration.md).

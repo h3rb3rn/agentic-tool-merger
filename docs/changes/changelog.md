@@ -7,6 +7,8 @@ changes to SessionMesh are recorded here.
 
 ### Added
 
+- Read-only host agent-home mounting for OCI discovery, with Codex resolved
+  below the shared profile root and persistent state kept separately.
 - Persistent branch protection instructions requiring purpose-specific
   branches and pull-request integration instead of direct pushes to `main`.
 - Persistent repository instructions for language, TDD, Clean Code,

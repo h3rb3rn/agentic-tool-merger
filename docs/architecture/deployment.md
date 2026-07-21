@@ -17,12 +17,12 @@ containerized core. The connector does not own canonical state.
 ```mermaid
 flowchart TB
     host["Host"]
-    codex["Host ~/.codex<br/>read-only"]
+    codex["Host agent home<br/>read-only"]
     other["Other tool stores<br/>read-only"]
     workspace["Selected workspaces<br/>read-only by default"]
     state["Persistent SessionMesh volume"]
     container["SessionMesh OCI container<br/>non-root"]
-    source1["/sources/codex"]
+    source1["/sources/home"]
     source2["/sources/&lt;tool&gt;"]
     repo["/workspaces/&lt;name&gt;"]
     home["/var/lib/sessionmesh<br/>SESSIONMESH_HOME"]
@@ -75,7 +75,8 @@ The daemon provisions `$SESSIONMESH_HOME/api-token` atomically with `0600`
 permissions. The token remains inside persistent runtime state and is never an
 image layer, Compose environment value, or repository template.
 
-The Compose service sets container-local `CODEX_HOME=/sources/codex`. The
+The Compose service mounts `SESSIONMESH_AGENT_HOME` read-only at
+`/sources/home` and sets container-local `CODEX_HOME=/sources/home/.codex`. The
 daemon repeatedly performs read-only discovery and cursor-based incremental
 scans at `SESSIONMESH_WATCH_DEBOUNCE_MS`. Only complete records commit; each
 new canonical event is then published to SSE clients. This makes synchronization
@@ -95,7 +96,7 @@ services:
       SESSIONMESH_HOME: /var/lib/sessionmesh
     volumes:
       - sessionmesh-data:/var/lib/sessionmesh
-      - ${HOME}/.codex:/sources/codex:ro
+      - ${SESSIONMESH_AGENT_HOME:-${HOME}}:/sources/home:ro
     ports:
       - "127.0.0.1:8787:8787"
 
@@ -117,6 +118,8 @@ as a temporary bootstrap server.
 - A missing source mount is a visible configuration or health condition, not a
   reason to scan the container home.
 - SessionMesh never changes permissions on native source mounts.
+- A full home mount expands the readable-data boundary. Use a dedicated
+  profile root whenever complete-home discovery is unnecessary.
 - Root containers are not a supported default.
 - Secrets enter the container only through explicit configuration mechanisms.
 - Remote network binding and remote model access remain opt-in.

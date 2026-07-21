@@ -7,14 +7,14 @@ services:
       SESSIONMESH_HOME: /var/lib/sessionmesh
       SESSIONMESH_BIND_ADDRESS: 0.0.0.0
       SESSIONMESH_ALLOW_NETWORK: "true"
-      CODEX_HOME: /sources/codex
+      CODEX_HOME: /sources/home/.codex
     ports:
       - "127.0.0.1:8787:8787"
     volumes:
       - sessionmesh-data:/var/lib/sessionmesh
       - type: bind
-        source: ${CODEX_HOME:-${HOME}/.codex}
-        target: /sources/codex
+        source: ${SESSIONMESH_AGENT_HOME:-${HOME}}
+        target: /sources/home
         read_only: true
     restart: unless-stopped
 
