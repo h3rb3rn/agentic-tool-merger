@@ -155,6 +155,15 @@ and a final sensitive-data audit reports no publishable findings. Initialize,
 stage, or commit Git history earlier only if the user explicitly supersedes
 this gate.
 
+## Git Branch Policy
+
+- Never commit directly to or push directly to `main`.
+- Start every change on a purpose-specific branch and publish only that branch.
+- Integrate changes into `main` through a reviewed pull request.
+- Before publishing a branch, synchronize it with the current remote default
+  branch and rerun the proportionate quality and security gates.
+- Rewriting shared history or force-pushing requires explicit user approval.
+
 ## Security Baseline
 
 - Open native stores read-only.

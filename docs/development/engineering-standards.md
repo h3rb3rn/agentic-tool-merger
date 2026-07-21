@@ -5,6 +5,13 @@
 All repository artifacts use English by default, including code, comments,
 documentation, tests, UI text, ADRs, change notes, and commit messages.
 
+## Git workflow
+
+Direct commits and pushes to `main` are prohibited. Each change is developed
+and published on a purpose-specific branch, synchronized with the current
+remote default branch, and integrated through a reviewed pull request. Shared
+history must not be rewritten without explicit approval.
+
 ## Test-driven development
 
 ```mermaid

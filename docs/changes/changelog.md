@@ -7,6 +7,8 @@ changes to SessionMesh are recorded here.
 
 ### Added
 
+- Persistent branch protection instructions requiring purpose-specific
+  branches and pull-request integration instead of direct pushes to `main`.
 - Persistent repository instructions for language, TDD, Clean Code,
   root-cause engineering, documentation, and security.
 - Material for MkDocs documentation foundation.
