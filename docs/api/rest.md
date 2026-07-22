@@ -33,20 +33,23 @@ not reveal whether a resource exists.
 
 ## Milestone 1 endpoints
 
-| Method | Path                           | Purpose                                |
-| ------ | ------------------------------ | -------------------------------------- |
-| GET    | `/api/v1/health`               | Service and API version                |
-| GET    | `/api/v1/tools`                | Safe tool discovery status             |
-| POST   | `/api/v1/tools/discover`       | Request discovery refresh              |
-| GET    | `/api/v1/native-sessions`      | Paginated native-session summaries     |
-| GET    | `/api/v1/native-sessions/{id}` | One native-session summary             |
-| GET    | `/api/v1/events/search`        | Cross-tool keyword content matches     |
-| GET    | `/api/v1/events`               | Paginated payload-free event summaries |
-| GET    | `/api/v1/events/{id}`          | Explicit canonical event detail reveal |
-| GET    | `/api/v1/events/stream`        | Resumable live summaries over SSE      |
-| GET    | `/api/v1/global-sessions`      | Global work contexts                   |
-| POST   | `/api/v1/global-sessions`      | Create a global work context           |
-| GET    | `/api/v1/global-sessions/{id}` | Membership and audit detail            |
+| Method | Path                                         | Purpose                                |
+| ------ | -------------------------------------------- | -------------------------------------- |
+| GET    | `/api/v1/health`                             | Service and API version                |
+| GET    | `/api/v1/tools`                              | Safe tool discovery status             |
+| POST   | `/api/v1/tools/discover`                     | Request discovery refresh              |
+| GET    | `/api/v1/native-sessions`                    | Paginated native-session summaries     |
+| GET    | `/api/v1/native-sessions/{id}`               | One native-session summary             |
+| GET    | `/api/v1/events/search`                      | Cross-tool keyword content matches     |
+| GET    | `/api/v1/events`                             | Paginated payload-free event summaries |
+| GET    | `/api/v1/events/{id}`                        | Explicit canonical event detail reveal |
+| GET    | `/api/v1/events/stream`                      | Resumable live summaries over SSE      |
+| GET    | `/api/v1/global-sessions`                    | Global work contexts                   |
+| POST   | `/api/v1/global-sessions`                    | Create a global work context           |
+| GET    | `/api/v1/global-sessions/{id}`               | Membership and audit detail            |
+| GET    | `/api/v1/correlation-candidates`             | Explainable cross-tool candidates      |
+| POST   | `/api/v1/correlation-candidates/{id}/accept` | Accept and audit a candidate           |
+| POST   | `/api/v1/correlation-candidates/{id}/reject` | Reject and block silent relinking      |
 
 Membership link/unlink endpoints and correlation accept/reject operations are
 authenticated writes. They store native-session references only, and every
@@ -84,8 +87,10 @@ deterministic.
 ## Response safety
 
 Session and event list responses deliberately exclude canonical payloads, raw
-objects, prompts, tool output, and sensitive-field values. They expose only
-identity, chronology, kind, CWD, branch, and lifecycle metadata.
+objects, full prompts, tool output, and sensitive-field values. Session
+summaries expose identity, lifecycle metadata, a bounded native title or first
+message fallback, normalized event count, and approximate canonical byte size
+for navigation, sorting, and grouping.
 
 The authenticated event-detail endpoint includes the canonical payload and
 provenance. It exists for an explicit UI reveal only and must not be fetched

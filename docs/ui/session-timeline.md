@@ -13,6 +13,8 @@ flowchart LR
     merge --> timeline["Accessible timeline"]
     search["Authenticated FTS5 keyword search"] --> matches["Tool + session matches"]
     matches --> timeline
+    candidates["Explainable correlation candidates"] --> review["Accept or reject"]
+    review --> timeline
     timeline --> warning["Explicit sensitive-data warning"]
     warning --> detail["Canonical event detail"]
 ```
@@ -38,6 +40,11 @@ The OCI image already uses `/usr/share/sessionmesh/web`.
 
 - Session identity is encoded through `URLSearchParams`; arbitrary native IDs
   cannot alter API paths.
+- Session navigation uses the native thread title when an adapter supplies it,
+  otherwise a bounded first user message and finally the native ID. The native
+  ID remains available as the button tooltip and API identity.
+- Sessions can be sorted by topic, latest observed date, or normalized content
+  size and grouped by exact topic, calendar date, or documented size bands.
 - Initial and live events are deduplicated by deterministic event ID and
   restored to timestamp, native-sequence, and ID order.
 - Adjacent tool calls and results are visually grouped without removing either
@@ -52,6 +59,9 @@ The OCI image already uses `/usr/share/sessionmesh/web`.
 - Keyword search spans all imported canonical events and labels every match
   with its agent tool, native session ID, event kind, excerpt, and provenance
   path. Selecting a result opens that native session.
+- Correlation Review shows the two native session IDs, target global context,
+  percentage score, and each workspace, time, and content signal. Accept and
+  reject actions are authenticated, audited, and immediately persisted.
 - The layout becomes a horizontally scrollable session selector on narrow
   screens and honors reduced-motion preferences.
 

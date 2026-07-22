@@ -145,12 +145,71 @@ aside nav {
   margin-top: 1rem;
 }
 
+.session-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.55rem;
+  margin-top: 1rem;
+}
+
+.session-controls label {
+  display: grid;
+  gap: 0.3rem;
+  color: #8fa4a4;
+  font-size: 0.75rem;
+}
+
+.session-controls select {
+  min-width: 0;
+  padding: 0.5rem;
+}
+
+.session-group {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.session-group h3 {
+  margin: 0.55rem 0 0;
+  color: #8fa4a4;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .global-review {
   display: grid;
   gap: 0.8rem;
   margin-top: 2rem;
   padding-top: 1.2rem;
   border-top: 1px solid #294142;
+}
+
+.correlation-review {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 1.5rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid #294142;
+}
+
+.correlation-review article {
+  padding: 0.75rem;
+  border: 1px solid #294142;
+  border-radius: 0.55rem;
+  background: #0a1819;
+}
+
+.correlation-review article p {
+  margin: 0.3rem 0;
+  overflow-wrap: anywhere;
+}
+
+.correlation-review ul {
+  padding-left: 1.2rem;
+  color: #8fa4a4;
+  font-size: 0.78rem;
 }
 
 .global-review form,

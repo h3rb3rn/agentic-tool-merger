@@ -134,6 +134,23 @@ pub struct StoredSessionMember {
     pub manual_state: Option<String>,
 }
 
+/// Explainable proposed relationship between two native sessions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredCorrelationCandidate {
+    /// Deterministic candidate identity.
+    pub id: String,
+    /// Session that is not yet assigned by this candidate.
+    pub left_native_session_id: String,
+    /// Existing session providing the target global context.
+    pub right_native_session_id: String,
+    /// Combined deterministic and content score.
+    pub score: f64,
+    /// Pending, accepted, or rejected review state.
+    pub status: String,
+    /// Versioned, human-readable evidence JSON objects.
+    pub evidence: Vec<String>,
+}
+
 /// One immutable manual membership decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MembershipAuditEntry {
@@ -659,6 +676,117 @@ impl Storage {
         .bind(updated_at)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Stores a correlation candidate and replaces its versioned evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an input or database error.
+    pub async fn upsert_correlation_candidate(
+        &self,
+        candidate: &StoredCorrelationCandidate,
+    ) -> Result<(), StorageError> {
+        if !(0.0..=1.0).contains(&candidate.score) {
+            return Err(StorageError::InvalidInput {
+                field: "candidate.score",
+                message: "must be between zero and one",
+            });
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO correlation_candidates
+                (id, left_native_session_id, right_native_session_id, score, status)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET score = excluded.score,
+                status = CASE WHEN correlation_candidates.status = 'rejected'
+                              THEN 'rejected' ELSE excluded.status END",
+        )
+        .bind(&candidate.id)
+        .bind(&candidate.left_native_session_id)
+        .bind(&candidate.right_native_session_id)
+        .bind(candidate.score)
+        .bind(&candidate.status)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM correlation_evidence WHERE candidate_id = ?")
+            .bind(&candidate.id)
+            .execute(&mut *transaction)
+            .await?;
+        for (index, evidence) in candidate.evidence.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO correlation_evidence
+                    (id, candidate_id, evidence_type, weight, evidence_json)
+                 VALUES (?, ?, 'explainable-signal', 1.0, ?)",
+            )
+            .bind(format!("{}:{index}", candidate.id))
+            .bind(&candidate.id)
+            .bind(evidence)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Lists correlation candidates and their evidence for review.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error.
+    pub async fn list_correlation_candidates(
+        &self,
+    ) -> Result<Vec<StoredCorrelationCandidate>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, left_native_session_id, right_native_session_id, score, status
+             FROM correlation_candidates ORDER BY score DESC, id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut candidates = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.get("id");
+            let evidence = sqlx::query_scalar(
+                "SELECT evidence_json FROM correlation_evidence
+                 WHERE candidate_id = ? ORDER BY id",
+            )
+            .bind(&id)
+            .fetch_all(&self.pool)
+            .await?;
+            candidates.push(StoredCorrelationCandidate {
+                id,
+                left_native_session_id: row.get("left_native_session_id"),
+                right_native_session_id: row.get("right_native_session_id"),
+                score: row.get("score"),
+                status: row.get("status"),
+                evidence,
+            });
+        }
+        Ok(candidates)
+    }
+
+    /// Persists an explicit candidate review decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an input or database error.
+    pub async fn set_correlation_candidate_status(
+        &self,
+        id: &str,
+        status: &str,
+    ) -> Result<(), StorageError> {
+        if !matches!(status, "accepted" | "rejected") {
+            return Err(StorageError::InvalidInput {
+                field: "candidate.status",
+                message: "must be accepted or rejected",
+            });
+        }
+        sqlx::query("UPDATE correlation_candidates SET status = ? WHERE id = ?")
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -1921,6 +2049,50 @@ mod tests {
         assert!(inserted);
         assert!(observed <= 1);
         assert_eq!(storage.event_count().await.expect("final count works"), 1);
+    }
+
+    #[tokio::test]
+    async fn correlation_candidates_preserve_evidence_and_rejections() {
+        let (_directory, storage) = test_storage().await;
+        for (id, family) in [("agy:left", "agy"), ("opencode:right", "opencode")] {
+            sqlx::query(
+                "INSERT INTO native_sessions (id, tool_family, surface, profile)
+                 VALUES (?, ?, 'cli', 'test')",
+            )
+            .bind(id)
+            .bind(family)
+            .execute(storage.pool())
+            .await
+            .expect("candidate fixture session should persist");
+        }
+        let mut candidate = StoredCorrelationCandidate {
+            id: "candidate_test".to_owned(),
+            left_native_session_id: "agy:left".to_owned(),
+            right_native_session_id: "opencode:right".to_owned(),
+            score: 0.72,
+            status: "pending".to_owned(),
+            evidence: vec![r#"{"signal":"content_jaccard","similarity":0.7}"#.to_owned()],
+        };
+        storage
+            .upsert_correlation_candidate(&candidate)
+            .await
+            .expect("candidate should persist");
+        storage
+            .set_correlation_candidate_status(&candidate.id, "rejected")
+            .await
+            .expect("review should persist");
+
+        candidate.score = 0.91;
+        storage
+            .upsert_correlation_candidate(&candidate)
+            .await
+            .expect("rescoring should update evidence without reversing review");
+        let stored = storage.list_correlation_candidates().await.unwrap();
+
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].status, "rejected");
+        assert!((stored[0].score - 0.91).abs() < f64::EPSILON);
+        assert_eq!(stored[0].evidence, candidate.evidence);
     }
 
     #[tokio::test]

@@ -119,10 +119,11 @@ must never be copied into `.env`, `.env.example`, documentation, or Git.
 
 ## Project state
 
-The MVP implementation includes active Codex, Claude Code, and Continue
-ingestion, immutable raw and canonical storage, authenticated REST/SSE, the
-responsive timeline, automatic audited global-session correlation,
-cross-tool keyword search, human-readable event content, deterministic handoff
+The MVP implementation includes active Codex, Claude Code, Continue, OpenCode,
+and Agy ingestion, immutable raw and canonical storage, authenticated REST/SSE,
+the responsive timeline, explainable audited global-session correlation,
+thread-title navigation with topic/date/size organization, cross-tool keyword
+search, human-readable event content, deterministic handoff
 refresh, and stdio MCP/startup delivery. The
 [implementation ledger](docs/development/implementation-status.md) records the
 verified scope and remaining limitations.

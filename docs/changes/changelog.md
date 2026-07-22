@@ -7,6 +7,13 @@ changes to SessionMesh are recorded here.
 
 ### Added
 
+- Read-only OpenCode SQLite ingestion restricted to allowlisted session-content
+  tables and Agy history ingestion that excludes OAuth and credential state.
+- Thread-title session navigation with native metadata and bounded fallbacks,
+  plus topic, date, and normalized-size sorting and grouping.
+- Explainable cross-tool content correlation with persisted workspace,
+  temporal, and lexical evidence, configurable automatic linking, and an
+  authenticated accept/reject review interface.
 - Authenticated cross-tool keyword search with tool-family, native-session,
   normalized content excerpt, and provenance-path results.
 - Human-readable timeline content mode for messages, commands, and results,
