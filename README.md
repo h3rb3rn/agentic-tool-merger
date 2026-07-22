@@ -102,6 +102,10 @@ Important variables:
 | `SESSIONMESH_TOKEN_BUDGET`          | `4000`                             | Maximum handoff budget             |
 | `SESSIONMESH_CORRELATION_THRESHOLD` | `0.8`                              | Automatic-link threshold           |
 | `SESSIONMESH_AGENT_HOME`            | `${HOME}`                          | Read-only host agent-profile root  |
+| `SESSIONMESH_RUN_UID`               | `10001`                            | Container UID; match profile owner |
+| `SESSIONMESH_RUN_GID`               | `10001`                            | Container GID; match profile owner |
+| `SESSIONMESH_PROFILE_ROOT`          | `/sources/home`                    | Container-readable profile root    |
+| `SESSIONMESH_PROFILE_ORIGINAL_ROOT` | `${HOME}`                          | Host provenance path label         |
 | `CODEX_HOME`                        | `$HOME/.codex`                     | Native Codex source outside OCI    |
 
 The complete precedence, validation, and path-expansion contract is documented
@@ -114,9 +118,10 @@ must never be copied into `.env`, `.env.example`, documentation, or Git.
 
 ## Project state
 
-The MVP implementation includes active incremental Codex ingestion, immutable
-raw and canonical storage, authenticated REST/SSE, the responsive timeline,
-audited global sessions, deterministic handoffs, and stdio MCP delivery. The
+The MVP implementation includes active Codex, Claude Code, and Continue
+ingestion, immutable raw and canonical storage, authenticated REST/SSE, the
+responsive timeline, automatic audited global-session correlation,
+deterministic handoff refresh, and stdio MCP/startup delivery. The
 [implementation ledger](docs/development/implementation-status.md) records the
 verified scope and remaining limitations.
 

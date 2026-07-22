@@ -3,10 +3,14 @@ services:
     build:
       context: .
     image: sessionmesh:local
+    # Match the owner of private agent stores while remaining non-root.
+    user: "${SESSIONMESH_RUN_UID:-10001}:${SESSIONMESH_RUN_GID:-10001}"
     environment:
       SESSIONMESH_HOME: /var/lib/sessionmesh
       SESSIONMESH_BIND_ADDRESS: 0.0.0.0
       SESSIONMESH_ALLOW_NETWORK: "true"
+      SESSIONMESH_PROFILE_ROOT: /sources/home
+      SESSIONMESH_PROFILE_ORIGINAL_ROOT: ${SESSIONMESH_AGENT_HOME:-${HOME}}
       CODEX_HOME: /sources/home/.codex
     ports:
       - "127.0.0.1:8787:8787"

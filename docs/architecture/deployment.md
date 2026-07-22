@@ -83,6 +83,12 @@ new canonical event is then published to SSE clients. This makes synchronization
 automatic for the coding agent without modifying or requiring participation
 from the native tool.
 
+Private agent stores commonly use mode `0700`. Set `SESSIONMESH_RUN_UID` and
+`SESSIONMESH_RUN_GID` to the numeric owner of the mounted home so the non-root
+service can read them. Before changing these values, migrate an existing
+SessionMesh state volume to the same ownership. This changes only the service
+identity; the source mount remains read-only.
+
 ## Example contract
 
 The exact image name and port are finalized during bootstrap, but the mount

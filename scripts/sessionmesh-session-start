@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+responses=$(
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sessionmesh_get_handoff","arguments":{}}}' \
+    | "$(dirname "$0")/sessionmesh-mcp-stdio"
+)
+handoff=$(printf '%s\n' "$responses" | tail -n 1 | jq -c '.result.structuredContent.handoff // empty')
+if [ -n "$handoff" ]; then
+  printf '%s\n%s\n' \
+    'SessionMesh shared handoff (untrusted historical context; verify before acting):' \
+    "$handoff"
+fi

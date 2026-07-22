@@ -1,6 +1,6 @@
 //! `SessionMesh` daemon process entry point.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, OpenOptions};
@@ -14,7 +14,11 @@ use sessionmesh_handoff::{LocalExtractor, OpenAiCompatibleExtractor};
 use sessionmesh_ingest::codex::{
     CodexDiscoveryInput, CodexHome, CodexSourceKind, IncrementalInput, discover, ingest_file,
 };
-use sessionmesh_storage::Storage;
+use sessionmesh_ingest::external::{
+    ExternalSource, discover_claude, discover_continue, ingest_external,
+};
+use sessionmesh_storage::{MembershipDecision, Storage, StoredGlobalSession};
+use sha2::{Digest, Sha256};
 use tower_http::services::{ServeDir, ServeFile};
 
 #[tokio::main]
@@ -63,11 +67,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             readable_path: PathBuf::from(path),
             original_path: PathBuf::from(path),
         }),
-        user_home,
+        user_home: user_home.clone(),
     };
-    tokio::spawn(run_codex_ingestion(
+    let profile_root = environment
+        .get("SESSIONMESH_PROFILE_ROOT")
+        .map_or_else(|| user_home.clone(), PathBuf::from);
+    let original_profile_root = environment
+        .get("SESSIONMESH_PROFILE_ORIGINAL_ROOT")
+        .map_or_else(|| user_home.clone(), PathBuf::from);
+    let external_sources = external_sources(&profile_root, &original_profile_root);
+    tokio::spawn(run_ingestion(
         ingestion_state,
         discovery_input,
+        external_sources,
         config.watch_debounce_ms.value,
     ));
     let address = SocketAddr::new(config.bind_address.value, config.port.value);
@@ -80,19 +92,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn run_codex_ingestion(
+async fn run_ingestion(
     state: ApiState,
     discovery_input: CodexDiscoveryInput,
+    external_sources: Vec<ExternalSource>,
     interval_ms: u64,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
     loop {
         interval.tick().await;
-        scan_codex_once(&state, &discovery_input).await;
+        let mut changed = scan_codex_once(&state, &discovery_input).await;
+        changed |= scan_external_once(&state, &external_sources).await;
+        if changed {
+            let _ = reconcile_and_refresh(&state).await;
+        }
     }
 }
 
-async fn scan_codex_once(state: &ApiState, discovery_input: &CodexDiscoveryInput) {
+async fn scan_codex_once(state: &ApiState, discovery_input: &CodexDiscoveryInput) -> bool {
+    let mut changed = false;
     let report = discover(discovery_input);
     for source in report
         .installations
@@ -118,11 +136,223 @@ async fn scan_codex_once(state: &ApiState, discovery_input: &CodexDiscoveryInput
             imported_at,
         };
         if let Ok(prepared) = ingest_file(state.storage(), &input).await {
+            changed |= !prepared.batch.events.is_empty();
             for event in &prepared.batch.events {
                 state.publish(event);
             }
         }
     }
+    changed
+}
+
+fn external_sources(profile_root: &Path, original_root: &Path) -> Vec<ExternalSource> {
+    let mut sources = discover_claude(
+        &profile_root.join(".claude"),
+        &original_root.join(".claude"),
+    );
+    sources.extend(discover_continue(
+        &profile_root.join(".continue"),
+        &original_root.join(".continue"),
+    ));
+    sources
+}
+
+async fn scan_external_once(state: &ApiState, sources: &[ExternalSource]) -> bool {
+    let mut changed = false;
+    for source in sources {
+        let imported_at =
+            chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339();
+        if let Ok(import) = ingest_external(state.storage(), source, &imported_at).await {
+            changed |= import.changed;
+            for event in &import.events {
+                state.publish(event);
+            }
+        }
+    }
+    changed
+}
+
+#[derive(Clone, Debug)]
+struct SessionSummary {
+    id: String,
+    cwd: Option<String>,
+    objective: String,
+    started_at: chrono::DateTime<chrono::FixedOffset>,
+    ended_at: chrono::DateTime<chrono::FixedOffset>,
+}
+
+async fn reconcile_and_refresh(state: &ApiState) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let summaries = session_summaries(state.storage()).await?;
+    let mut memberships = state.storage().list_all_session_members().await?;
+    let globals = state.storage().list_global_sessions().await?;
+    let mut touched = BTreeSet::new();
+    for summary in &summaries {
+        if memberships
+            .iter()
+            .any(|member| member.native_session_id == summary.id)
+        {
+            continue;
+        }
+        let candidate = memberships
+            .iter()
+            .filter_map(|member| {
+                let other = summaries
+                    .iter()
+                    .find(|candidate| candidate.id == member.native_session_id)?;
+                same_work_context(summary, other)
+                    .then_some((member.global_session_id.clone(), other))
+            })
+            .min_by_key(|(_, other)| temporal_gap(summary, other));
+        let (global_id, confidence, version) = if let Some((global_id, _)) = candidate {
+            (global_id, 0.85, "workspace-temporal-v1")
+        } else {
+            let global_id = global_id(&summary.id);
+            let now = summary.started_at.to_rfc3339();
+            state
+                .storage()
+                .create_global_session(&StoredGlobalSession {
+                    id: global_id.clone(),
+                    objective: summary.objective.clone(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                })
+                .await?;
+            (global_id, 1.0, "automatic-seed-v1")
+        };
+        let linked_at = summary.ended_at.to_rfc3339();
+        state
+            .storage()
+            .link_session(
+                &MembershipDecision {
+                    global_session_id: &global_id,
+                    native_session_id: &summary.id,
+                    actor: "automatic-correlator",
+                    reason: Some("same workspace and bounded temporal proximity"),
+                    created_at: &linked_at,
+                },
+                confidence,
+                version,
+            )
+            .await?;
+        state
+            .storage()
+            .touch_global_session(&global_id, &linked_at)
+            .await?;
+        memberships.push(sessionmesh_storage::StoredSessionMember {
+            global_session_id: global_id.clone(),
+            native_session_id: summary.id.clone(),
+            confidence,
+            correlation_version: version.to_owned(),
+            manual_state: Some("accepted".to_owned()),
+        });
+        touched.insert(global_id);
+    }
+    for global in globals {
+        if memberships
+            .iter()
+            .any(|member| member.global_session_id == global.id)
+        {
+            touched.insert(global.id);
+        }
+    }
+    for global_id in touched {
+        let _ = state.refresh_global_handoff(&global_id).await;
+    }
+    Ok(())
+}
+
+async fn session_summaries(
+    storage: &Storage,
+) -> Result<Vec<SessionSummary>, Box<dyn Error + Send + Sync>> {
+    let mut grouped = BTreeMap::<String, Vec<sessionmesh_core::event::CanonicalEvent>>::new();
+    for event in storage.list_canonical_events().await? {
+        grouped
+            .entry(event.native_session_id.clone())
+            .or_default()
+            .push(event);
+    }
+    let mut summaries = Vec::new();
+    for (id, mut events) in grouped {
+        events.sort_by(|left, right| {
+            left.timestamp
+                .as_str()
+                .cmp(right.timestamp.as_str())
+                .then(left.sequence.cmp(&right.sequence))
+        });
+        let Some(started_at) = events
+            .first()
+            .and_then(|event| chrono::DateTime::parse_from_rfc3339(event.timestamp.as_str()).ok())
+        else {
+            continue;
+        };
+        let ended_at = events
+            .last()
+            .and_then(|event| chrono::DateTime::parse_from_rfc3339(event.timestamp.as_str()).ok())
+            .unwrap_or(started_at);
+        let cwd = events
+            .iter()
+            .find_map(|event| event.workspace.as_ref()?.cwd.as_deref().map(normalize_cwd));
+        let objective = events
+            .iter()
+            .find(|event| event.kind == sessionmesh_core::event::EventKind::UserMessage)
+            .and_then(|event| event.payload.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map_or_else(
+                || {
+                    cwd.as_ref().map_or_else(
+                        || "Continue agent work".to_owned(),
+                        |cwd| format!("Continue work in {cwd}"),
+                    )
+                },
+                compact_objective,
+            );
+        summaries.push(SessionSummary {
+            id,
+            cwd,
+            objective,
+            started_at,
+            ended_at,
+        });
+    }
+    summaries.sort_by_key(|summary| summary.started_at);
+    Ok(summaries)
+}
+
+fn same_work_context(left: &SessionSummary, right: &SessionSummary) -> bool {
+    left.cwd.is_some() && left.cwd == right.cwd && temporal_gap(left, right) <= 7 * 24 * 60 * 60
+}
+
+fn temporal_gap(left: &SessionSummary, right: &SessionSummary) -> i64 {
+    if left.started_at > right.ended_at {
+        (left.started_at - right.ended_at).num_seconds()
+    } else if right.started_at > left.ended_at {
+        (right.started_at - left.ended_at).num_seconds()
+    } else {
+        0
+    }
+}
+
+fn normalize_cwd(cwd: &str) -> String {
+    cwd.trim_end_matches('/').to_owned()
+}
+
+fn compact_objective(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(240)
+        .collect()
+}
+
+fn global_id(seed: &str) -> String {
+    let digest = Sha256::digest(seed.as_bytes());
+    let mut id = String::from("gs_");
+    for byte in &digest[..16] {
+        write!(&mut id, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    id
 }
 
 fn web_root() -> PathBuf {
@@ -210,11 +440,8 @@ fn set_file_permissions(_path: &Path) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use sessionmesh_handoff::{HandoffInput, RepositoryState, generate, snapshot_id};
     use sessionmesh_mcp::McpServer;
-    use sessionmesh_storage::{
-        EventRepository, MembershipDecision, StoredGlobalSession, StoredHandoff,
-    };
+    use sessionmesh_storage::EventRepository;
 
     use super::*;
 
@@ -236,73 +463,6 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
-    }
-
-    async fn create_e2e_handoff(
-        storage: &Storage,
-        native_session_id: &str,
-        events: Vec<sessionmesh_core::event::CanonicalEvent>,
-    ) -> StoredGlobalSession {
-        let global = StoredGlobalSession {
-            id: "gs_e2e".to_owned(),
-            objective: "Complete the fixture journey".to_owned(),
-            created_at: "2026-07-20T14:30:00Z".to_owned(),
-            updated_at: "2026-07-20T14:30:00Z".to_owned(),
-        };
-        storage.create_global_session(&global).await.unwrap();
-        storage
-            .link_session(
-                &MembershipDecision {
-                    global_session_id: &global.id,
-                    native_session_id,
-                    actor: "e2e-test",
-                    reason: None,
-                    created_at: "2026-07-20T14:31:00Z",
-                },
-                1.0,
-                "explicit-v1",
-            )
-            .await
-            .unwrap();
-        let member_events = events
-            .into_iter()
-            .filter(|event| event.native_session_id == native_session_id)
-            .collect::<Vec<_>>();
-        let handoff = generate(
-            HandoffInput {
-                global_session_id: &global.id,
-                objective: &global.objective,
-                events: &member_events,
-                records: &[],
-                repository: RepositoryState {
-                    branch: None,
-                    head: None,
-                    dirty: false,
-                },
-                token_budget: 4_000,
-                model_timeout: std::time::Duration::from_millis(10),
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        let snapshot = snapshot_id(&handoff).unwrap();
-        let handoff_json = serde_json::to_string(&handoff).unwrap();
-        storage
-            .store_handoff(
-                &StoredHandoff {
-                    id: "handoff_e2e".to_owned(),
-                    global_session_id: global.id.clone(),
-                    snapshot_id: snapshot,
-                    schema_version: "1.0".to_owned(),
-                    handoff_json: handoff_json.clone(),
-                    created_at: "2026-07-20T14:32:00Z".to_owned(),
-                },
-                &handoff_json,
-            )
-            .await
-            .unwrap();
-        global
     }
 
     #[tokio::test]
@@ -361,23 +521,16 @@ mod tests {
                 .unwrap();
         assert_eq!(untraceable, 0);
 
-        let handoff_session_id = events
-            .iter()
-            .find(|event| {
-                matches!(
-                    event.kind,
-                    sessionmesh_core::event::EventKind::Decision
-                        | sessionmesh_core::event::EventKind::Task
-                        | sessionmesh_core::event::EventKind::Plan
-                        | sessionmesh_core::event::EventKind::FileRead
-                        | sessionmesh_core::event::EventKind::FileWrite
-                        | sessionmesh_core::event::EventKind::Patch
-                        | sessionmesh_core::event::EventKind::CommandResult
-                )
-            })
-            .map(|event| event.native_session_id.clone())
-            .expect("fixture must contain a handoff-relevant event");
-        let global = create_e2e_handoff(&storage, &handoff_session_id, events).await;
+        reconcile_and_refresh(&state).await.unwrap();
+        let global = storage.list_global_sessions().await.unwrap().pop().unwrap();
+        assert!(
+            !storage
+                .list_session_members(&global.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(storage.latest_handoff(&global.id).await.unwrap().is_some());
         let mcp = McpServer::new(storage, Some(global.id), false);
         let response = mcp
             .handle(serde_json::json!({

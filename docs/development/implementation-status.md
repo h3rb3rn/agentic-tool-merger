@@ -4,11 +4,19 @@ This page is the canonical restart and execution ledger.
 
 ## Current state
 
-- **Current milestone:** Milestones 0–2 complete — release candidate
+- **Current milestone:** Milestone 3 integration foundation implemented
 - **Active prompt:** None
-- **Next prompt:** Roadmap decision for Milestone 3
+- **Next prompt:** Expand Claude and Continue native event coverage
 - **Last completed prompt:** 14 — MVP Hardening
 - **Known blockers:** None
+
+The running integration foundation now discovers Claude Code and Continue
+sessions from a read-only agent home, correlates sessions by normalized
+workspace and bounded temporal proximity, refreshes deterministic handoffs,
+and delivers them to Codex, Claude Code, and Continue through MCP and startup
+connectors. Native transcript synchronization remains intentionally excluded:
+shared knowledge is delivered as provenance-backed context without mutating
+tool-owned stores.
 
 ## Prompt ledger
 

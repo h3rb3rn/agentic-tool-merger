@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+# Preserve the MCP client's host working directory as correlation evidence.
+exec docker exec -i \
+  -e "SESSIONMESH_PROJECT_ROOT=$PWD" \
+  -e SESSIONMESH_MCP_ALLOW_WRITES=true \
+  agenttool-merger-sessionmesh-1 \
+  sessionmesh-mcp

@@ -68,9 +68,13 @@ nav:
   - Adapters:
       - SDK and Process Protocol: adapters/adapter-sdk.md
       - Codex Discovery: adapters/codex.md
+      - Claude Code: adapters/claude-code.md
+      - Continue: adapters/continue.md
   - API:
       - REST and SSE: api/rest.md
       - MCP: api/mcp.md
+  - Integrations:
+      - Automatic delivery: integrations/automatic-delivery.md
   - User Interface:
       - Session Timeline: ui/session-timeline.md
   - Implementation:

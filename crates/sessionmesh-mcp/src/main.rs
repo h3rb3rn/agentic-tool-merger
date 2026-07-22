@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::path::PathBuf;
 
-use sessionmesh_mcp::{McpServer, current_global_id};
+use sessionmesh_mcp::{McpServer, resolve_current_global_id};
 use sessionmesh_storage::Storage;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -18,7 +18,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .or_else(|| std::env::current_dir().ok());
     let writes_authorized =
         std::env::var("SESSIONMESH_MCP_ALLOW_WRITES").is_ok_and(|value| value == "true");
-    let server = McpServer::new(storage, current_global_id(project_root), writes_authorized);
+    let current = resolve_current_global_id(&storage, project_root).await;
+    let server = McpServer::new(storage, current, writes_authorized);
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut output = tokio::io::stdout();
     while let Some(line) = lines.next_line().await? {

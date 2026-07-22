@@ -14,11 +14,12 @@ sessionmesh-core = { path = "../sessionmesh-core" }
 sessionmesh-ingest = { path = "../sessionmesh-ingest" }
 sessionmesh-handoff = { path = "../sessionmesh-handoff" }
 sessionmesh-storage = { path = "../sessionmesh-storage" }
+serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 sessionmesh-mcp = { path = "../sessionmesh-mcp" }
 sqlx.workspace = true
 tempfile.workspace = true

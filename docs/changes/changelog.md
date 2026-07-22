@@ -7,6 +7,9 @@ changes to SessionMesh are recorded here.
 
 ### Added
 
+- Automatic cross-tool correlation and handoff refresh, read-only Claude Code
+  and Continue adapters, and startup delivery connectors for Codex, Claude
+  Code, and Continue.
 - Read-only host agent-home mounting for OCI discovery, with Codex resolved
   below the shared profile root and persistent state kept separately.
 - Persistent branch protection instructions requiring purpose-specific

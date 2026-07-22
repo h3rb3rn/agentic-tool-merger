@@ -615,6 +615,53 @@ impl Storage {
             .collect())
     }
 
+    /// Lists every global-session membership for deterministic reconciliation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when memberships cannot be read.
+    pub async fn list_all_session_members(&self) -> Result<Vec<StoredSessionMember>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT global_session_id, native_session_id, confidence,
+                    correlation_version, manual_state
+             FROM global_session_members ORDER BY global_session_id, native_session_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| StoredSessionMember {
+                global_session_id: row.get("global_session_id"),
+                native_session_id: row.get("native_session_id"),
+                confidence: row.get("confidence"),
+                correlation_version: row.get("correlation_version"),
+                manual_state: row.get("manual_state"),
+            })
+            .collect())
+    }
+
+    /// Advances the global-session freshness boundary after member ingestion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the session cannot be updated.
+    pub async fn touch_global_session(
+        &self,
+        global_session_id: &str,
+        updated_at: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE global_sessions SET updated_at = ?
+             WHERE id = ? AND updated_at < ?",
+        )
+        .bind(updated_at)
+        .bind(global_session_id)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Applies and audits a manual membership decision transactionally.
     ///
     /// Rejected pairs cannot be linked until `reverse_rejection` is called.

@@ -206,6 +206,19 @@ pub enum HandoffError {
     Serialization,
 }
 
+impl std::fmt::Display for HandoffError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidInput(field) => write!(formatter, "invalid handoff input: {field}"),
+            Self::MissingProvenance => formatter.write_str("handoff has no supported provenance"),
+            Self::BudgetTooSmall => formatter.write_str("handoff token budget is too small"),
+            Self::Serialization => formatter.write_str("handoff serialization failed"),
+        }
+    }
+}
+
+impl std::error::Error for HandoffError {}
+
 /// Generates a useful handoff with or without a configured local model.
 ///
 /// Model timeout and malformed output degrade to deterministic mode. Secret
@@ -298,9 +311,21 @@ fn extract_facts(events: &[CanonicalEvent]) -> ExtractedFacts {
     let mut completed = BTreeSet::new();
     let mut tasks = BTreeSet::new();
     let mut files = BTreeSet::new();
+    let mut latest_user = None;
+    let mut latest_assistant = None;
     for event in events {
         let text = payload_text(event);
         match event.kind {
+            EventKind::UserMessage
+                if text.as_deref().is_some_and(|text| !text.trim().is_empty()) =>
+            {
+                latest_user = Some((text, event));
+            }
+            EventKind::AssistantMessage
+                if text.as_deref().is_some_and(|text| !text.trim().is_empty()) =>
+            {
+                latest_assistant = Some((text, event));
+            }
             EventKind::Decision => push_fact(
                 &mut facts.provenance,
                 &mut decisions,
@@ -346,6 +371,22 @@ fn extract_facts(events: &[CanonicalEvent]) -> ExtractedFacts {
             }
             _ => {}
         }
+    }
+    if tasks.is_empty()
+        && let Some((text, event)) = latest_user
+    {
+        push_fact(&mut facts.provenance, &mut tasks, text, event, "open_tasks");
+    }
+    if completed.is_empty()
+        && let Some((text, event)) = latest_assistant
+    {
+        push_fact(
+            &mut facts.provenance,
+            &mut completed,
+            text,
+            event,
+            "completed",
+        );
     }
     facts.decisions = decisions.into_iter().collect();
     facts.completed = completed.into_iter().collect();

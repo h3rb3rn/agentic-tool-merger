@@ -376,11 +376,59 @@ pub fn current_global_id(project_root: Option<PathBuf>) -> Option<String> {
         .map(|marker| marker.global_session_id)
 }
 
+/// Resolves current scope from an explicit marker or imported workspace data.
+///
+/// Containerized MCP processes cannot necessarily read the host project path.
+/// In that case the canonical event store provides the latest audited
+/// membership whose normalized CWD matches the MCP client's working directory.
+pub async fn resolve_current_global_id(
+    storage: &Storage,
+    project_root: Option<PathBuf>,
+) -> Option<String> {
+    if let Some(id) = current_global_id(project_root.clone()) {
+        return Some(id);
+    }
+    let requested = normalize_path(project_root?.to_string_lossy().as_ref());
+    let memberships = storage.list_all_session_members().await.ok()?;
+    let member_to_global = memberships
+        .into_iter()
+        .map(|member| (member.native_session_id, member.global_session_id))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    storage
+        .list_canonical_events()
+        .await
+        .ok()?
+        .into_iter()
+        .filter(|event| {
+            event
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.cwd.as_deref())
+                .is_some_and(|cwd| normalize_path(cwd) == requested)
+        })
+        .filter_map(|event| {
+            let global = member_to_global.get(&event.native_session_id)?.clone();
+            Some((event.timestamp.as_str().to_owned(), event.sequence, global))
+        })
+        .max()
+        .map(|(_, _, global)| global)
+}
+
+fn normalize_path(path: &str) -> String {
+    path.trim_end_matches('/').to_owned()
+}
+
 pub use sessionmesh_core::bootstrap_stage;
 
 #[cfg(test)]
 mod tests {
-    use sessionmesh_storage::StoredGlobalSession;
+    use std::collections::BTreeMap;
+
+    use sessionmesh_core::event::{
+        CanonicalEvent, EventDraft, EventKind, EventProvenance, EventTimestamp, TimestampPrecision,
+        ToolIdentity, WorkspaceContext,
+    };
+    use sessionmesh_storage::{EventRepository, MembershipDecision, StoredGlobalSession};
 
     use super::*;
 
@@ -409,6 +457,75 @@ mod tests {
 
     fn request(id: i64, method: &str, params: &Value) -> Value {
         json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+    }
+
+    #[tokio::test]
+    async fn resolves_containerized_client_scope_from_imported_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(
+            directory.path().join("sessionmesh.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .unwrap();
+        storage
+            .create_global_session(&StoredGlobalSession {
+                id: "gs_workspace".to_owned(),
+                objective: "Share context".to_owned(),
+                created_at: "2026-07-21T10:00:00Z".to_owned(),
+                updated_at: "2026-07-21T10:00:00Z".to_owned(),
+            })
+            .await
+            .unwrap();
+        let event = CanonicalEvent::from_draft(EventDraft {
+            tool: ToolIdentity {
+                family: "codex".to_owned(),
+                surface: "cli".to_owned(),
+                profile: "default".to_owned(),
+            },
+            native_session_id: "native-workspace".to_owned(),
+            sequence: 0,
+            timestamp: EventTimestamp::parse("2026-07-21T10:00:00Z").unwrap(),
+            timestamp_precision: TimestampPrecision::Second,
+            kind: EventKind::UserMessage,
+            workspace: Some(WorkspaceContext {
+                cwd: Some("/workspace/project/".to_owned()),
+                repository_id: None,
+                branch: None,
+                head: None,
+            }),
+            payload: BTreeMap::from([("text".to_owned(), "Work".into())]),
+            provenance: EventProvenance {
+                source_path: "/source".to_owned(),
+                original_path: None,
+                source_offset: 0,
+                source_generation: "generation".to_owned(),
+                adapter_version: "test".to_owned(),
+                ingestion_sequence: 0,
+                ordering_confidence: Some(1.0),
+            },
+        })
+        .unwrap();
+        storage.store_event(&event).await.unwrap();
+        storage
+            .link_session(
+                &MembershipDecision {
+                    global_session_id: "gs_workspace",
+                    native_session_id: "native-workspace",
+                    actor: "test",
+                    reason: None,
+                    created_at: "2026-07-21T10:00:00Z",
+                },
+                1.0,
+                "test-v1",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolve_current_global_id(&storage, Some(PathBuf::from("/workspace/project"))).await,
+            Some("gs_workspace".to_owned())
+        );
     }
 
     #[tokio::test]

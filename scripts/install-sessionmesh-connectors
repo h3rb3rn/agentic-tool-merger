@@ -1,0 +1,79 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+mcp_bridge="$repository_root/scripts/sessionmesh-mcp-stdio"
+session_hook="$repository_root/scripts/sessionmesh-session-start"
+instruction="$repository_root/connectors/sessionmesh-agent-instruction.md"
+codex_home=${CODEX_HOME:-"$HOME/.codex"}
+claude_home=${CLAUDE_CONFIG_DIR:-"$HOME/.claude"}
+continue_home=${CONTINUE_HOME:-"$HOME/.continue"}
+
+for command in codex claude jq yq docker; do
+  command -v "$command" >/dev/null 2>&1 || {
+    printf 'required command is unavailable: %s\n' "$command" >&2
+    exit 1
+  }
+done
+
+codex mcp get sessionmesh >/dev/null 2>&1 && codex mcp remove sessionmesh >/dev/null
+codex mcp add sessionmesh -- "$mcp_bridge"
+
+claude mcp get sessionmesh >/dev/null 2>&1 \
+  && claude mcp remove --scope user sessionmesh >/dev/null
+claude mcp add --scope user sessionmesh -- "$mcp_bridge"
+
+mkdir -p "$codex_home" "$claude_home" "$continue_home"
+if [ ! -e "$codex_home/AGENTS.md" ]; then
+  install -m 0600 "$instruction" "$codex_home/AGENTS.md"
+elif grep -q '^# SessionMesh shared context$' "$codex_home/AGENTS.md"; then
+  install -m 0600 "$instruction" "$codex_home/AGENTS.md"
+elif ! grep -q 'sessionmesh_get_handoff' "$codex_home/AGENTS.md"; then
+  printf '%s\n' 'Codex AGENTS.md already exists; add the SessionMesh instruction manually.' >&2
+  exit 1
+fi
+
+claude_settings="$claude_home/settings.json"
+if [ ! -e "$claude_settings" ]; then
+  printf '{}\n' >"$claude_settings"
+  chmod 0600 "$claude_settings"
+fi
+if [ ! -e "$claude_settings.sessionmesh-backup" ]; then
+  cp -p "$claude_settings" "$claude_settings.sessionmesh-backup"
+fi
+temporary=$(mktemp "$claude_home/.settings.sessionmesh.XXXXXX")
+jq --arg command "$session_hook" '
+  .hooks.SessionStart = (
+    (.hooks.SessionStart // [])
+    | map(select(any(.hooks[]?; .command == $command) | not))
+    + [{
+        matcher: "startup|resume|clear|compact",
+        hooks: [{type: "command", command: $command, timeout: 30}]
+      }]
+  )
+' "$claude_settings" >"$temporary"
+chmod --reference="$claude_settings" "$temporary"
+mv "$temporary" "$claude_settings"
+
+continue_config="$continue_home/config.yaml"
+test -f "$continue_config" || {
+  printf 'Continue configuration is unavailable: %s\n' "$continue_config" >&2
+  exit 1
+}
+if [ ! -e "$continue_config.sessionmesh-backup" ]; then
+  cp -p "$continue_config" "$continue_config.sessionmesh-backup"
+fi
+yq --in-place --yaml-output --arg command "$mcp_bridge" '
+  .mcpServers = (
+    (.mcpServers // [])
+    | map(select(.name != "SessionMesh"))
+    + [{name: "SessionMesh", command: $command}]
+  )
+  | .rules = (
+    (.rules // [])
+    | map(select(. != "At the beginning of agent work, call sessionmesh_get_handoff and verify its historical facts before acting."))
+    + ["At the beginning of agent work, call sessionmesh_get_handoff and verify its historical facts before acting."]
+  )
+' "$continue_config"
+
+printf '%s\n' 'SessionMesh connectors installed for Codex, Claude Code, and Continue.'

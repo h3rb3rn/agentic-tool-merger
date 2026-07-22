@@ -13,8 +13,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sessionmesh_core::event::{CanonicalEvent, EventKind};
 use sessionmesh_handoff::{
-    HANDOFF_SCHEMA_VERSION, Handoff, HandoffInput, LocalExtractor, RecordedFact, RepositoryState,
-    generate, snapshot_id,
+    HANDOFF_SCHEMA_VERSION, Handoff, HandoffError, HandoffInput, LocalExtractor, RecordedFact,
+    RepositoryState, generate, snapshot_id,
 };
 use sessionmesh_storage::{
     MembershipAuditEntry, MembershipDecision, Storage, StorageError, StoredGlobalSession,
@@ -76,6 +76,140 @@ impl ApiState {
     #[must_use]
     pub fn storage(&self) -> &Storage {
         &self.storage
+    }
+
+    /// Regenerates and stores the compact handoff for a global session.
+    ///
+    /// This shared boundary is used by both the authenticated HTTP endpoint
+    /// and daemon-owned automatic refresh after ingestion and correlation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HandoffRefreshError::NotFound`] for an unknown global session
+    /// or wraps storage and generation failures from the persistence layer.
+    pub async fn refresh_global_handoff(
+        &self,
+        global_id: &str,
+    ) -> Result<Handoff, HandoffRefreshError> {
+        let session = self
+            .storage
+            .list_global_sessions()
+            .await?
+            .into_iter()
+            .find(|session| session.id == global_id)
+            .ok_or(HandoffRefreshError::NotFound)?;
+        let member_ids = self
+            .storage
+            .list_session_members(global_id)
+            .await?
+            .into_iter()
+            .map(|member| member.native_session_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let events = self
+            .storage
+            .list_canonical_events()
+            .await?
+            .into_iter()
+            .filter(|event| member_ids.contains(&event.native_session_id))
+            .collect::<Vec<_>>();
+        let records = self
+            .storage
+            .list_session_records(global_id)
+            .await?
+            .into_iter()
+            .map(|record| RecordedFact {
+                provenance_id: record.id,
+                kind: record.record_type,
+                content: record.content,
+            })
+            .collect::<Vec<_>>();
+        let handoff = generate(
+            HandoffInput {
+                global_session_id: global_id,
+                objective: &session.objective,
+                events: &events,
+                records: &records,
+                repository: RepositoryState {
+                    branch: events
+                        .iter()
+                        .rev()
+                        .find_map(|event| event.workspace.as_ref()?.branch.clone()),
+                    head: events
+                        .iter()
+                        .rev()
+                        .find_map(|event| event.workspace.as_ref()?.head.clone()),
+                    dirty: events
+                        .iter()
+                        .rev()
+                        .find_map(|event| {
+                            event
+                                .payload
+                                .get("dirty")
+                                .and_then(serde_json::Value::as_bool)
+                        })
+                        .unwrap_or(false),
+                },
+                token_budget: self.handoff_token_budget,
+                model_timeout: std::time::Duration::from_secs(15),
+            },
+            self.extractor.as_deref(),
+        )
+        .await?;
+        let snapshot_id = snapshot_id(&handoff)?;
+        let handoff_json =
+            serde_json::to_string(&handoff).map_err(|_| HandoffRefreshError::Serialization)?;
+        self.storage
+            .store_handoff(
+                &StoredHandoff {
+                    id: format!("handoff_{}", snapshot_id.trim_start_matches("snapshot_")),
+                    global_session_id: global_id.to_owned(),
+                    snapshot_id,
+                    schema_version: HANDOFF_SCHEMA_VERSION.to_owned(),
+                    handoff_json: handoff_json.clone(),
+                    created_at: now_rfc3339(),
+                },
+                &handoff_json,
+            )
+            .await?;
+        Ok(handoff)
+    }
+}
+
+/// Failure while regenerating a global-session handoff.
+#[derive(Debug)]
+pub enum HandoffRefreshError {
+    /// Global session does not exist.
+    NotFound,
+    /// Storage access failed.
+    Storage(StorageError),
+    /// Deterministic/model-assisted generation failed.
+    Handoff(HandoffError),
+    /// Valid handoff could not be encoded.
+    Serialization,
+}
+
+impl std::fmt::Display for HandoffRefreshError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => formatter.write_str("global session was not found"),
+            Self::Storage(error) => write!(formatter, "storage error: {error}"),
+            Self::Handoff(error) => write!(formatter, "handoff error: {error}"),
+            Self::Serialization => formatter.write_str("handoff serialization failed"),
+        }
+    }
+}
+
+impl std::error::Error for HandoffRefreshError {}
+
+impl From<StorageError> for HandoffRefreshError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl From<HandoffError> for HandoffRefreshError {
+    fn from(error: HandoffError) -> Self {
+        Self::Handoff(error)
     }
 }
 
@@ -615,87 +749,16 @@ async fn refresh_handoff(
     Path(global_id): Path<String>,
 ) -> Result<Json<Handoff>, ApiError> {
     authorize(&state, &headers)?;
-    let session = state
-        .storage
-        .list_global_sessions()
-        .await?
-        .into_iter()
-        .find(|session| session.id == global_id)
-        .ok_or(ApiError::NotFound)?;
-    let member_ids = state
-        .storage
-        .list_session_members(&global_id)
-        .await?
-        .into_iter()
-        .map(|member| member.native_session_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    let events = state
-        .storage
-        .list_canonical_events()
-        .await?
-        .into_iter()
-        .filter(|event| member_ids.contains(&event.native_session_id))
-        .collect::<Vec<_>>();
-    let records = state
-        .storage
-        .list_session_records(&global_id)
-        .await?
-        .into_iter()
-        .map(|record| RecordedFact {
-            provenance_id: record.id,
-            kind: record.record_type,
-            content: record.content,
-        })
-        .collect::<Vec<_>>();
-    let handoff = generate(
-        HandoffInput {
-            global_session_id: &global_id,
-            objective: &session.objective,
-            events: &events,
-            records: &records,
-            repository: RepositoryState {
-                branch: events
-                    .iter()
-                    .rev()
-                    .find_map(|event| event.workspace.as_ref()?.branch.clone()),
-                head: events
-                    .iter()
-                    .rev()
-                    .find_map(|event| event.workspace.as_ref()?.head.clone()),
-                dirty: events
-                    .iter()
-                    .rev()
-                    .find_map(|event| {
-                        event
-                            .payload
-                            .get("dirty")
-                            .and_then(serde_json::Value::as_bool)
-                    })
-                    .unwrap_or(false),
-            },
-            token_budget: state.handoff_token_budget,
-            model_timeout: std::time::Duration::from_secs(15),
-        },
-        state.extractor.as_deref(),
-    )
-    .await
-    .map_err(|_| ApiError::InvalidInput)?;
-    let snapshot_id = snapshot_id(&handoff).map_err(|_| ApiError::Internal)?;
-    let handoff_json = serde_json::to_string(&handoff).map_err(|_| ApiError::Internal)?;
-    state
-        .storage
-        .store_handoff(
-            &StoredHandoff {
-                id: format!("handoff_{}", snapshot_id.trim_start_matches("snapshot_")),
-                global_session_id: global_id,
-                snapshot_id,
-                schema_version: HANDOFF_SCHEMA_VERSION.to_owned(),
-                handoff_json: handoff_json.clone(),
-                created_at: now_rfc3339(),
-            },
-            &handoff_json,
-        )
-        .await?;
+    let handoff = state
+        .refresh_global_handoff(&global_id)
+        .await
+        .map_err(|error| match error {
+            HandoffRefreshError::NotFound => ApiError::NotFound,
+            HandoffRefreshError::Handoff(_) => ApiError::InvalidInput,
+            HandoffRefreshError::Storage(_) | HandoffRefreshError::Serialization => {
+                ApiError::Internal
+            }
+        })?;
     Ok(Json(handoff))
 }
 
