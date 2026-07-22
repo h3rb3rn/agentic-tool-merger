@@ -13,7 +13,7 @@ services:
       SESSIONMESH_PROFILE_ORIGINAL_ROOT: ${SESSIONMESH_AGENT_HOME:-${HOME}}
       CODEX_HOME: /sources/home/.codex
     ports:
-      - "127.0.0.1:8787:8787"
+      - "${SESSIONMESH_PUBLISH_ADDRESS:-127.0.0.1}:8787:8787"
     volumes:
       - sessionmesh-data:/var/lib/sessionmesh
       - type: bind

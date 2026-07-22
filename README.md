@@ -90,6 +90,7 @@ Important variables:
 | `SESSIONMESH_HOME`                  | `/var/lib/sessionmesh`             | Persistent service state           |
 | `SESSIONMESH_BIND_ADDRESS`          | `127.0.0.1`                        | Local API bind address             |
 | `SESSIONMESH_PORT`                  | `8787`                             | Local API port                     |
+| `SESSIONMESH_PUBLISH_ADDRESS`       | `127.0.0.1`                        | OCI host publish address           |
 | `SESSIONMESH_ALLOW_NETWORK`         | `false`                            | Explicit remote-network opt-in     |
 | `SESSIONMESH_WEB_ROOT`              | `/usr/share/sessionmesh/web`       | Built web application directory    |
 | `SESSIONMESH_DATABASE_PATH`         | `$SESSIONMESH_HOME/sessionmesh.db` | SQLite database                    |

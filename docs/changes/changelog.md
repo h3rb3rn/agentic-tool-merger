@@ -7,6 +7,8 @@ changes to SessionMesh are recorded here.
 
 ### Added
 
+- Configurable, interface-specific OCI publication through
+  `SESSIONMESH_PUBLISH_ADDRESS`, including LAN exposure guidance.
 - Automatic cross-tool correlation and handoff refresh, read-only Claude Code
   and Continue adapters, and startup delivery connectors for Codex, Claude
   Code, and Continue.
