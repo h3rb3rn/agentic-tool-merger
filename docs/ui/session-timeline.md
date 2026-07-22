@@ -45,6 +45,10 @@ The OCI image already uses `/usr/share/sessionmesh/web`.
   ID remains available as the button tooltip and API identity.
 - Sessions can be sorted by topic, latest observed date, or normalized content
   size and grouped by exact topic, calendar date, or documented size bands.
+- The navigation is a bounded, scrollable tree. Tool-family branches contain
+  collapsible grouping branches with result counts, while only the branch of
+  the active session starts expanded. A local title/tool/native-ID filter opens
+  matching branches without requesting or exposing event payloads.
 - Initial and live events are deduplicated by deterministic event ID and
   restored to timestamp, native-sequence, and ID order.
 - Adjacent tool calls and results are visually grouped without removing either

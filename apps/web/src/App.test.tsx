@@ -102,6 +102,9 @@ describe("Session timeline", () => {
     );
 
     await screen.findByRole("button", { name: /Implement session timeline/ });
+    fireEvent.change(screen.getByLabelText("Group by"), {
+      target: { value: "none" },
+    });
     fireEvent.change(screen.getByLabelText("Sort by"), {
       target: { value: "topic" },
     });
@@ -114,12 +117,42 @@ describe("Session timeline", () => {
     fireEvent.change(screen.getByLabelText("Group by"), {
       target: { value: "size" },
     });
+    expect(screen.getByText("Large (≥ 100 KB)")).toBeInTheDocument();
+    expect(screen.getByText("Small (< 10 KB)")).toBeInTheDocument();
+  });
+
+  it("branches a large session list by tool and filters without exposing IDs", async () => {
+    render(
+      <App
+        client={client({
+          listSessions: vi.fn().mockResolvedValue({
+            items: [
+              sessions[0],
+              {
+                ...sessions[0],
+                id: "opencode/private-id",
+                tool_family: "opencode",
+                thread_title: "Database migration",
+              },
+            ],
+            next_cursor: null,
+          }),
+        })}
+      />,
+    );
+
+    expect(await screen.findByText("codex")).toBeInTheDocument();
+    expect(screen.getByText("opencode")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Filter sessions"), {
+      target: { value: "migration" },
+    });
     expect(
-      screen.getByRole("heading", { name: "Large (≥ 100 KB)" }),
+      await screen.findByRole("button", { name: /Database migration/ }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "Small (< 10 KB)" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /Implement session timeline/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("opencode/private-id")).not.toBeInTheDocument();
   });
 
   it("filters events and preserves unknown malformed kinds", async () => {

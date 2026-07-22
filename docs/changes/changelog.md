@@ -11,6 +11,8 @@ changes to SessionMesh are recorded here.
   tables and Agy history ingestion that excludes OAuth and credential state.
 - Thread-title session navigation with native metadata and bounded fallbacks,
   plus topic, date, and normalized-size sorting and grouping.
+- Hierarchical, collapsible tool and session-group navigation with counts,
+  active-branch expansion, local filtering, and a bounded scroll region.
 - Explainable cross-tool content correlation with persisted workspace,
   temporal, and lexical evidence, configurable automatic linking, and an
   authenticated accept/reject review interface.

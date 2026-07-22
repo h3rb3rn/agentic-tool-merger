@@ -103,6 +103,27 @@ function groupSessions(
   }));
 }
 
+function sessionTree(
+  sessions: NativeSession[],
+  sort: SessionSort,
+  group: SessionGroup,
+) {
+  const tools = new Map<string, NativeSession[]>();
+  for (const session of sessions) {
+    tools.set(session.tool_family, [
+      ...(tools.get(session.tool_family) ?? []),
+      session,
+    ]);
+  }
+  return [...tools]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([tool, toolSessions]) => ({
+      tool,
+      count: toolSessions.length,
+      groups: groupSessions(toolSessions, sort, group),
+    }));
+}
+
 function sessionGroupLabel(session: NativeSession, group: SessionGroup) {
   if (group === "topic") return session.thread_title;
   if (group === "date") {
@@ -139,7 +160,8 @@ function Timeline({ client }: { client: SessionMeshClient }) {
   );
   const [sessionGroup, setSessionGroup] = useState<
     "none" | "topic" | "date" | "size"
-  >("none");
+  >("date");
+  const [sessionFilter, setSessionFilter] = useState("");
   const sessions = useQuery({
     queryKey: ["sessions"],
     queryFn: () => client.listSessions(),
@@ -148,9 +170,18 @@ function Timeline({ client }: { client: SessionMeshClient }) {
   const selectedSession = sessions.data?.items.find(
     (session) => session.id === effectiveId,
   );
-  const sessionGroups = useMemo(
-    () => groupSessions(sessions.data?.items ?? [], sessionSort, sessionGroup),
-    [sessionGroup, sessionSort, sessions.data?.items],
+  const visibleSessions = useMemo(() => {
+    const query = sessionFilter.trim().toLocaleLowerCase();
+    if (!query) return sessions.data?.items ?? [];
+    return (sessions.data?.items ?? []).filter((session) =>
+      [session.thread_title, session.id, session.tool_family].some((value) =>
+        value.toLocaleLowerCase().includes(query),
+      ),
+    );
+  }, [sessionFilter, sessions.data?.items]);
+  const sessionBranches = useMemo(
+    () => sessionTree(visibleSessions, sessionSort, sessionGroup),
+    [sessionGroup, sessionSort, visibleSessions],
   );
   const events = useQuery({
     queryKey: ["events", effectiveId, kind],
@@ -206,7 +237,19 @@ function Timeline({ client }: { client: SessionMeshClient }) {
       </header>
       <div className="workspace">
         <aside aria-label="Native sessions">
-          <h2>Sessions</h2>
+          <div className="session-navigation-heading">
+            <h2>Sessions</h2>
+            <span>{visibleSessions.length}</span>
+          </div>
+          <label className="session-filter">
+            Filter sessions
+            <input
+              type="search"
+              value={sessionFilter}
+              onChange={(event) => setSessionFilter(event.target.value)}
+              placeholder="Title, tool, or native ID"
+            />
+          </label>
           <div className="session-controls">
             <label>
               Sort by
@@ -248,34 +291,69 @@ function Timeline({ client }: { client: SessionMeshClient }) {
             />
           )}
           {sessions.data?.items.length === 0 && <p>No native sessions found</p>}
-          <nav>
-            {sessionGroups.map((group) => (
-              <section className="session-group" key={group.label}>
-                {sessionGroup !== "none" && <h3>{group.label}</h3>}
-                {group.sessions.map((session) => (
-                  <button
-                    className={
-                      session.id === effectiveId ? "session active" : "session"
-                    }
-                    key={session.id}
-                    title={`Native session: ${session.id}`}
-                    onClick={() => setSelectedId(session.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        setSelectedId(session.id);
-                      }
-                    }}
-                  >
-                    <strong>{session.thread_title}</strong>
-                    <span>
-                      {session.tool_family} ·{" "}
-                      {formatBytes(session.content_bytes)} ·{" "}
-                      {session.event_count} events
-                    </span>
-                  </button>
-                ))}
-              </section>
-            ))}
+          {sessions.data && visibleSessions.length === 0 && (
+            <p>No sessions match this filter</p>
+          )}
+          <nav aria-label="Session hierarchy">
+            {sessionBranches.map((branch) => {
+              const branchIsActive = branch.groups.some((group) =>
+                group.sessions.some((session) => session.id === effectiveId),
+              );
+              return (
+                <details
+                  className="tool-branch"
+                  open={branchIsActive || Boolean(sessionFilter) || undefined}
+                  key={`${branch.tool}:${sessionFilter}`}
+                >
+                  <summary>
+                    <strong>{branch.tool}</strong>
+                    <span>{branch.count}</span>
+                  </summary>
+                  {branch.groups.map((group) => {
+                    const groupIsActive = group.sessions.some(
+                      (session) => session.id === effectiveId,
+                    );
+                    return (
+                      <details
+                        className="session-group"
+                        open={
+                          sessionGroup === "none" ||
+                          groupIsActive ||
+                          Boolean(sessionFilter) ||
+                          undefined
+                        }
+                        key={group.label}
+                      >
+                        <summary>
+                          <span>{group.label}</span>
+                          <span>{group.sessions.length}</span>
+                        </summary>
+                        <div>
+                          {group.sessions.map((session) => (
+                            <button
+                              className={
+                                session.id === effectiveId
+                                  ? "session active"
+                                  : "session"
+                              }
+                              key={session.id}
+                              title={`Native session: ${session.id}`}
+                              onClick={() => setSelectedId(session.id)}
+                            >
+                              <strong>{session.thread_title}</strong>
+                              <span>
+                                {formatBytes(session.content_bytes)} ·{" "}
+                                {session.event_count} events
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </details>
+                    );
+                  })}
+                </details>
+              );
+            })}
           </nav>
           <GlobalSessionReview client={client} nativeSessionId={effectiveId} />
           <CorrelationReview client={client} />
