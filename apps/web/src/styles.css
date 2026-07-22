@@ -135,6 +135,7 @@ h2 {
 }
 
 aside {
+  min-width: 0;
   padding: 1.5rem 1rem 2rem 0;
   border-right: 1px solid #294142;
 }
@@ -144,7 +145,8 @@ aside nav {
   gap: 0.55rem;
   margin-top: 1rem;
   max-height: 58vh;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding-right: 0.35rem;
   scrollbar-gutter: stable;
 }
@@ -241,6 +243,8 @@ aside nav {
 
 .session-group > div {
   display: grid;
+  min-width: 0;
+  overflow: hidden;
   gap: 0.35rem;
   padding: 0 0.4rem 0.4rem;
 }
@@ -282,12 +286,17 @@ aside nav {
 .global-review form,
 .global-review label,
 .review-actions {
+  min-width: 0;
   display: grid;
   gap: 0.45rem;
 }
 
 .global-review input,
-.global-review button {
+.global-review select,
+.global-review button,
+.review-actions button {
+  width: 100%;
+  min-width: 0;
   min-height: 2.5rem;
   padding: 0.5rem 0.65rem;
 }
@@ -305,6 +314,10 @@ aside nav {
 time {
   color: #8fa4a4;
   font-size: 0.8rem;
+}
+
+.session strong {
+  overflow-wrap: anywhere;
 }
 
 .session.active {

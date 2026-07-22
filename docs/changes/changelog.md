@@ -13,6 +13,8 @@ changes to SessionMesh are recorded here.
   plus topic, date, and normalized-size sorting and grouping.
 - Hierarchical, collapsible tool and session-group navigation with counts,
   active-branch expansion, local filtering, and a bounded scroll region.
+- Responsive sidebar constraints verified in Chromium at desktop and mobile
+  widths, preventing long global-session labels from widening the page.
 - Explainable cross-tool content correlation with persisted workspace,
   temporal, and lexical evidence, configurable automatic linking, and an
   authenticated accept/reject review interface.
