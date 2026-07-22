@@ -48,6 +48,7 @@ function client(overrides: Partial<SessionMeshClient> = {}): SessionMeshClient {
       payload: { command: "printf synthetic-secret", output: "x".repeat(500) },
       provenance: { source_path: "/native/rollout.jsonl", source_offset: 12 },
     } as unknown as CanonicalEvent),
+    searchEvents: vi.fn().mockResolvedValue([]),
     listGlobalSessions: vi.fn().mockResolvedValue([]),
     getGlobalSession: vi.fn(),
     createGlobalSession: vi.fn(),
@@ -116,8 +117,83 @@ describe("Session timeline", () => {
     expect(screen.queryByText(/synthetic-secret/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Reveal now" }));
-    expect(await screen.findByText(/synthetic-secret/)).toBeInTheDocument();
+    expect(
+      (await screen.findAllByText(/synthetic-secret/)).length,
+    ).toBeGreaterThan(0);
     expect(api.getEvent).toHaveBeenCalledWith("event-1");
+  });
+
+  it("loads human-readable content for the complete visible timeline", async () => {
+    const api = client({
+      getEvent: vi.fn().mockImplementation((eventId: string) =>
+        Promise.resolve({
+          ...events.find((event) => event.event_id === eventId),
+          schema_version: "1.0",
+          payload:
+            eventId === "event-1"
+              ? { command: "cargo test --workspace" }
+              : { stdout: "98 tests passed", exit_code: 0 },
+          provenance: {
+            source_path: "/native/rollout.jsonl",
+            source_offset: eventId === "event-1" ? 12 : 48,
+          },
+        }),
+      ),
+    });
+    render(<App client={api} />);
+
+    await screen.findByText("Tool Call");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show timeline content" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Show content now" }));
+
+    expect(
+      await screen.findByText("cargo test --workspace"),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("98 tests passed")).toBeInTheDocument();
+    expect(screen.getAllByText("/native/rollout.jsonl")).toHaveLength(2);
+    expect(api.getEvent).toHaveBeenCalledWith("event-1");
+    expect(api.getEvent).toHaveBeenCalledWith("event-2");
+  });
+
+  it("finds keyword content across sessions and identifies each agent tool", async () => {
+    const api = client({
+      searchEvents: vi.fn().mockResolvedValue([
+        {
+          event_id: "match-1",
+          native_session_id: "claude:alpha",
+          tool_family: "claude-code",
+          kind: "assistant_message",
+          timestamp: "2026-07-20T14:31:00Z",
+          content: "Implemented canonical event migration",
+          source_path: "/home/user/.claude/projects/alpha.jsonl",
+        },
+        {
+          event_id: "match-2",
+          native_session_id: "continue:beta",
+          tool_family: "continue",
+          kind: "user_message",
+          timestamp: "2026-07-20T15:31:00Z",
+          content: "Continue the canonical event migration",
+          source_path: "/home/user/.continue/sessions/beta.json",
+        },
+      ]),
+    });
+    render(<App client={api} />);
+
+    fireEvent.change(screen.getByLabelText("Search session content"), {
+      target: { value: "canonical migration" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    expect(
+      await screen.findByText("Implemented canonical event migration"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("claude-code")).toBeInTheDocument();
+    expect(screen.getByText("continue")).toBeInTheDocument();
+    expect(screen.getByText("claude:alpha")).toBeInTheDocument();
+    expect(api.searchEvents).toHaveBeenCalledWith("canonical migration");
   });
 
   it("shows loading, empty, stale, and recoverable error states", async () => {

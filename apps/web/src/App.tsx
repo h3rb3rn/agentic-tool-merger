@@ -80,6 +80,10 @@ function Timeline({ client }: { client: SessionMeshClient }) {
     () => new URLSearchParams(window.location.search).get("session") ?? "",
   );
   const [kind, setKind] = useState("");
+  const [searchText, setSearchText] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showContent, setShowContent] = useState(false);
+  const [confirmingContent, setConfirmingContent] = useState(false);
   const [connected, setConnected] = useState(true);
   const sessions = useQuery({
     queryKey: ["sessions"],
@@ -90,6 +94,11 @@ function Timeline({ client }: { client: SessionMeshClient }) {
     queryKey: ["events", effectiveId, kind],
     queryFn: () => client.listEvents(effectiveId, kind || undefined),
     enabled: Boolean(effectiveId),
+  });
+  const search = useQuery({
+    queryKey: ["event-search", searchQuery],
+    queryFn: () => client.searchEvents(searchQuery),
+    enabled: Boolean(searchQuery),
   });
 
   useEffect(() => {
@@ -168,6 +177,61 @@ function Timeline({ client }: { client: SessionMeshClient }) {
           <GlobalSessionReview client={client} nativeSessionId={effectiveId} />
         </aside>
         <section className="timeline-panel" aria-labelledby="timeline-heading">
+          <form
+            className="content-search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              setSearchQuery(searchText.trim());
+            }}
+          >
+            <label htmlFor="session-content-search">
+              Search session content
+            </label>
+            <div>
+              <input
+                id="session-content-search"
+                value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+                placeholder="Keywords across Codex, Claude, and Continue"
+                required
+              />
+              <button type="submit">Search</button>
+            </div>
+          </form>
+          {search.isFetching && <p role="status">Searching session content…</p>}
+          {search.isError && (
+            <ErrorState
+              message="Search is temporarily unavailable"
+              retry={search.refetch}
+            />
+          )}
+          {searchQuery && search.data?.length === 0 && (
+            <p>No keyword matches</p>
+          )}
+          {search.data && search.data.length > 0 && (
+            <section
+              className="search-results"
+              aria-label="Session search results"
+            >
+              <h2>Cross-tool matches</h2>
+              <ol>
+                {search.data.map((result) => (
+                  <li key={result.event_id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedId(result.native_session_id)}
+                    >
+                      <span className="tool-badge">{result.tool_family}</span>
+                      <strong>{result.native_session_id}</strong>
+                      <span>{eventLabel(result.kind)}</span>
+                      <p>{result.content}</p>
+                      <small>{result.source_path}</small>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )}
           <div className="timeline-heading">
             <div>
               <p className="eyebrow">CHRONOLOGICAL TRACE</p>
@@ -187,7 +251,41 @@ function Timeline({ client }: { client: SessionMeshClient }) {
                 <option value="error">Errors</option>
               </select>
             </label>
+            <button
+              type="button"
+              className="reveal"
+              onClick={() => setConfirmingContent(true)}
+              disabled={showContent}
+            >
+              {showContent
+                ? "Timeline content visible"
+                : "Show timeline content"}
+            </button>
           </div>
+          {confirmingContent && (
+            <div
+              role="dialog"
+              aria-label="Timeline content warning"
+              className="warning"
+            >
+              <p>
+                Normalized session content and source paths may contain secrets
+                or private data.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowContent(true);
+                  setConfirmingContent(false);
+                }}
+              >
+                Show content now
+              </button>
+              <button type="button" onClick={() => setConfirmingContent(false)}>
+                Cancel
+              </button>
+            </div>
+          )}
           {events.isPending && effectiveId && (
             <p role="status">Loading events…</p>
           )}
@@ -212,6 +310,7 @@ function Timeline({ client }: { client: SessionMeshClient }) {
                     key={event.event_id}
                     event={event}
                     client={client}
+                    revealContent={showContent}
                   />
                 ))}
               </li>
@@ -347,9 +446,11 @@ function ErrorState({
 function EventCard({
   event,
   client,
+  revealContent,
 }: {
   event: EventSummary;
   client: SessionMeshClient;
+  revealContent: boolean;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [detail, setDetail] = useState<CanonicalEvent>();
@@ -357,6 +458,16 @@ function EventCard({
     setDetail(await client.getEvent(event.event_id));
     setConfirming(false);
   };
+  useEffect(() => {
+    if (!revealContent || detail) return;
+    let active = true;
+    void client.getEvent(event.event_id).then((loaded) => {
+      if (active) setDetail(loaded);
+    });
+    return () => {
+      active = false;
+    };
+  }, [client, detail, event.event_id, revealContent]);
   return (
     <article className={`event event-${event.kind || "unknown"}`}>
       <div className="event-title">
@@ -395,9 +506,49 @@ function EventCard({
           </button>
         </div>
       )}
-      {detail && <pre tabIndex={0}>{JSON.stringify(detail, null, 2)}</pre>}
+      {detail && <EventContent detail={detail} />}
     </article>
   );
+}
+
+function EventContent({ detail }: { detail: CanonicalEvent }) {
+  const preferredFields = [
+    "text",
+    "command",
+    "stdout",
+    "output",
+    "content",
+    "message",
+  ];
+  const values = preferredFields
+    .map((field) => [field, detail.payload[field]] as const)
+    .filter((entry) => entry[1] !== undefined && entry[1] !== null);
+  const sourcePath = String(detail.provenance.source_path ?? "Unknown source");
+  return (
+    <section className="event-content" aria-label="Event content">
+      {values.length > 0 ? (
+        values.map(([field, value]) => (
+          <div key={field}>
+            <strong>{eventLabel(field)}</strong>
+            <pre tabIndex={0}>{formatContent(value)}</pre>
+          </div>
+        ))
+      ) : (
+        <pre tabIndex={0}>{JSON.stringify(detail.payload, null, 2)}</pre>
+      )}
+      <details>
+        <summary>Full canonical event</summary>
+        <pre tabIndex={0}>{JSON.stringify(detail, null, 2)}</pre>
+      </details>
+      <p className="event-source">
+        Source: <span>{sourcePath}</span>
+      </p>
+    </section>
+  );
+}
+
+function formatContent(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
 function groupEvents(events: EventSummary[]): EventSummary[][] {

@@ -7,6 +7,10 @@ changes to SessionMesh are recorded here.
 
 ### Added
 
+- Authenticated cross-tool keyword search with tool-family, native-session,
+  normalized content excerpt, and provenance-path results.
+- Human-readable timeline content mode for messages, commands, and results,
+  with one explicit sensitive-data acknowledgement and canonical JSON details.
 - Configurable, interface-specific OCI publication through
   `SESSIONMESH_PUBLISH_ADDRESS`, including LAN exposure guidance.
 - Automatic cross-tool correlation and handoff refresh, read-only Claude Code

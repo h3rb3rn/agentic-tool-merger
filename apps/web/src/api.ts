@@ -27,6 +27,16 @@ export interface CanonicalEvent extends EventSummary {
   provenance: Record<string, unknown>;
 }
 
+export interface SearchResult {
+  event_id: string;
+  native_session_id: string;
+  tool_family: string;
+  kind: string;
+  timestamp: string;
+  content: string;
+  source_path: string;
+}
+
 export interface GlobalSession {
   id: string;
   objective: string;
@@ -56,6 +66,7 @@ export interface SessionMeshClient {
   listSessions(): Promise<Page<NativeSession>>;
   listEvents(sessionId: string, kind?: string): Promise<Page<EventSummary>>;
   getEvent(eventId: string): Promise<CanonicalEvent>;
+  searchEvents(query: string): Promise<SearchResult[]>;
   listGlobalSessions(): Promise<GlobalSession[]>;
   getGlobalSession(id: string): Promise<GlobalSessionDetail>;
   createGlobalSession(objective: string): Promise<GlobalSession>;
@@ -106,6 +117,10 @@ export function createApiClient(token: string): SessionMeshClient {
     },
     getEvent: (eventId) =>
       request(`/api/v1/events/${encodeURIComponent(eventId)}`),
+    searchEvents: (query) =>
+      request(
+        `/api/v1/events/search?${new URLSearchParams({ query, limit: "100" }).toString()}`,
+      ),
     listGlobalSessions: () => request("/api/v1/global-sessions"),
     getGlobalSession: (id) =>
       request(`/api/v1/global-sessions/${encodeURIComponent(id)}`),

@@ -122,7 +122,8 @@ must never be copied into `.env`, `.env.example`, documentation, or Git.
 The MVP implementation includes active Codex, Claude Code, and Continue
 ingestion, immutable raw and canonical storage, authenticated REST/SSE, the
 responsive timeline, automatic audited global-session correlation,
-deterministic handoff refresh, and stdio MCP/startup delivery. The
+cross-tool keyword search, human-readable event content, deterministic handoff
+refresh, and stdio MCP/startup delivery. The
 [implementation ledger](docs/development/implementation-status.md) records the
 verified scope and remaining limitations.
 

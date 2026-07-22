@@ -222,6 +222,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/native-sessions", get(native_sessions))
         .route("/api/v1/native-sessions/{id}", get(native_session))
         .route("/api/v1/events", get(events))
+        .route("/api/v1/events/search", get(search_events))
         .route("/api/v1/events/{id}", get(event_detail))
         .route("/api/v1/events/stream", get(event_stream))
         .route(
@@ -441,6 +442,87 @@ async fn event_detail(
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchQuery {
+    query: String,
+    limit: Option<usize>,
+}
+
+/// Authenticated cross-tool full-text search result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SearchResult {
+    /// Deterministic event ID.
+    pub event_id: String,
+    /// Native session containing the match.
+    pub native_session_id: String,
+    /// Agent tool family owning the native session.
+    pub tool_family: String,
+    /// Canonical event kind.
+    pub kind: String,
+    /// Original event timestamp.
+    pub timestamp: String,
+    /// Human-readable normalized content excerpt.
+    pub content: String,
+    /// Native source path retained for provenance.
+    pub source_path: String,
+}
+
+async fn search_events(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<Vec<SearchResult>>, ApiError> {
+    authorize(&state, &headers)?;
+    let expression = keyword_expression(&query.query)?;
+    let limit = page_size(query.limit)?.min(100);
+    let events = state.storage.search_events(&expression, limit, 0).await?;
+    let mut results = Vec::with_capacity(events.len());
+    for event in events {
+        let session = state
+            .storage
+            .get_native_session(&event.native_session_id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        results.push(SearchResult {
+            event_id: event.event_id.as_str().to_owned(),
+            native_session_id: event.native_session_id,
+            tool_family: session.tool_family,
+            kind: kind_name(event.kind).to_owned(),
+            timestamp: event.timestamp.as_str().to_owned(),
+            content: event_content(&event.payload),
+            source_path: event.provenance.source_path,
+        });
+    }
+    Ok(Json(results))
+}
+
+fn keyword_expression(query: &str) -> Result<String, ApiError> {
+    let query = query.trim();
+    if query.is_empty() || query.len() > 256 {
+        return Err(ApiError::InvalidInput);
+    }
+    let terms = query
+        .split_whitespace()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        return Err(ApiError::InvalidInput);
+    }
+    Ok(terms.join(" AND "))
+}
+
+fn event_content(payload: &BTreeMap<String, serde_json::Value>) -> String {
+    const CONTENT_FIELDS: [&str; 6] = ["text", "command", "stdout", "output", "content", "message"];
+    let content = CONTENT_FIELDS
+        .iter()
+        .find_map(|field| payload.get(*field).and_then(serde_json::Value::as_str))
+        .map_or_else(
+            || serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_owned()),
+            ToOwned::to_owned,
+        );
+    content.chars().take(1_000).collect()
 }
 
 /// Global session projection with reference-only membership and audit data.
@@ -1268,6 +1350,29 @@ mod tests {
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(body["event_id"], stored.event_id.as_str());
         assert_eq!(body["payload"]["api_key"], "synthetic-secret-value");
+    }
+
+    #[tokio::test]
+    async fn keyword_search_returns_content_session_tool_and_provenance() {
+        let (_directory, state) = state().await;
+        state
+            .storage
+            .store_event(&event("session-search", 1, "2026-07-20T14:30:00Z"))
+            .await
+            .unwrap();
+        let response = router(state)
+            .oneshot(request(
+                "/api/v1/events/search?query=safe%20summary&limit=20",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json(response).await;
+        assert_eq!(body[0]["native_session_id"], "session-search");
+        assert_eq!(body[0]["tool_family"], "codex");
+        assert_eq!(body[0]["content"], "safe summary must exclude this");
+        assert_eq!(body[0]["source_path"], "/sources/codex/rollout.jsonl");
+        assert!(body[0].get("api_key").is_none());
     }
 
     #[tokio::test]

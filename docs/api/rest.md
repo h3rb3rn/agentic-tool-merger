@@ -40,6 +40,7 @@ not reveal whether a resource exists.
 | POST   | `/api/v1/tools/discover`       | Request discovery refresh              |
 | GET    | `/api/v1/native-sessions`      | Paginated native-session summaries     |
 | GET    | `/api/v1/native-sessions/{id}` | One native-session summary             |
+| GET    | `/api/v1/events/search`        | Cross-tool keyword content matches     |
 | GET    | `/api/v1/events`               | Paginated payload-free event summaries |
 | GET    | `/api/v1/events/{id}`          | Explicit canonical event detail reveal |
 | GET    | `/api/v1/events/stream`        | Resumable live summaries over SSE      |
