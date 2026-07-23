@@ -3,6 +3,9 @@
 SessionMesh keeps native tool stores read-only and delivers derived shared
 state through supported integration surfaces.
 
+For installation commands and a step-by-step explanation intended for new
+users, start with [First steps for users](../getting-started/first-steps.md).
+
 ```mermaid
 sequenceDiagram
     participant ToolStore as Native tool store (RO)
@@ -35,6 +38,16 @@ global-session membership whose imported CWD matches that working directory.
 Connector installation may update user tool configuration, but it never edits
 native transcript or session files. Backups are made before structured user
 configuration changes.
+
+Install all currently supported outbound connectors with:
+
+```bash
+cd /opt/deployment/agenttool-merger
+scripts/install-sessionmesh-connectors
+```
+
+Restart the agent clients afterward so they load the new MCP registrations and
+hooks.
 
 ## Trust boundary
 

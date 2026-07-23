@@ -69,6 +69,26 @@ flowchart LR
 See the [deployment model](docs/architecture/deployment.md) for the mount and
 security contract.
 
+## Getting started
+
+For a beginner-friendly walkthrough covering one-time connector installation,
+Web UI authentication, connection checks, native session resume, and
+cross-tool continuation after a rate limit, read:
+
+**[First steps for users](docs/getting-started/first-steps.md)**
+
+The short version for the deployed service is:
+
+```bash
+cd /opt/deployment/agenttool-merger
+docker compose ps
+scripts/install-sessionmesh-connectors
+```
+
+Restart Codex, Claude Code, and Continue after installing their connectors.
+Always start the next agent from the project directory whose work should be
+continued.
+
 ## Configuration
 
 Copy the safe template for local development:

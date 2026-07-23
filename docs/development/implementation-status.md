@@ -24,6 +24,10 @@ are attached to paired thread context cards and can be expanded into workspace,
 time, similarity, and shared-keyword evidence instead of being shown beside
 opaque native IDs alone.
 
+The user documentation now includes a beginner-oriented path from service and
+connector setup through connection verification, Web UI authentication, native
+resume, and cross-tool continuation after a rate limit.
+
 ## Prompt ledger
 
 | Prompt                            | State       | Dependencies | Result                                                 |

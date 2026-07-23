@@ -7,6 +7,9 @@ changes to SessionMesh are recorded here.
 
 ### Added
 
+- Beginner-oriented setup and usage guide covering service checks, connector
+  installation, Web UI authentication, native resume, cross-tool rate-limit
+  handoff, correlation review, manual fallback, and troubleshooting.
 - Read-only OpenCode SQLite ingestion restricted to allowlisted session-content
   tables and Agy history ingestion that excludes OAuth and credential state.
 - Thread-title session navigation with native metadata and bounded fallbacks,

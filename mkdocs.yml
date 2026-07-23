@@ -39,6 +39,8 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Getting Started:
+      - First Steps: getting-started/first-steps.md
   - Architecture:
       - Complete Project Plan: architecture/project-plan.md
       - Canonical Events: architecture/canonical-events.md
