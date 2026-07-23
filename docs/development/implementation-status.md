@@ -19,6 +19,11 @@ connectors. Native transcript synchronization remains intentionally excluded:
 shared knowledge is delivered as provenance-backed context without mutating
 tool-owned stores.
 
+The Correlation Review presents a bounded, searchable queue. Candidate scores
+are attached to paired thread context cards and can be expanded into workspace,
+time, similarity, and shared-keyword evidence instead of being shown beside
+opaque native IDs alone.
+
 ## Prompt ledger
 
 | Prompt                            | State       | Dependencies | Result                                                 |

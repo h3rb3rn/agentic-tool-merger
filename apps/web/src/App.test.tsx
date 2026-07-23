@@ -278,6 +278,31 @@ describe("Session timeline", () => {
 
   it("explains and accepts an uncertain cross-tool correlation", async () => {
     const api = client({
+      listSessions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            id: "agy:alpha",
+            tool_family: "agy",
+            surface: "cli",
+            started_at: "2026-07-20T14:00:00Z",
+            ended_at: "2026-07-20T14:30:00Z",
+            thread_title: "Plan canonical event migration",
+            event_count: 4,
+            content_bytes: 2048,
+          },
+          {
+            id: "opencode:beta",
+            tool_family: "opencode",
+            surface: "cli",
+            started_at: "2026-07-20T14:40:00Z",
+            ended_at: "2026-07-20T15:00:00Z",
+            thread_title: "Implement event repository",
+            event_count: 8,
+            content_bytes: 4096,
+          },
+        ],
+        next_cursor: null,
+      }),
       listCorrelationCandidates: vi.fn().mockResolvedValue([
         {
           id: "candidate-1",
@@ -288,7 +313,11 @@ describe("Session timeline", () => {
           status: "pending",
           evidence: [
             { signal: "workspace", matched: true },
-            { signal: "content_jaccard", similarity: 0.64 },
+            {
+              signal: "content_jaccard",
+              similarity: 0.64,
+              shared_terms: ["canonical", "event", "migration"],
+            },
           ],
         },
       ]),
@@ -296,8 +325,19 @@ describe("Session timeline", () => {
     render(<App client={api} />);
 
     expect(await screen.findByText("78% match")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("Plan canonical event migration"),
+    ).not.toHaveLength(0);
+    expect(screen.getAllByText("Implement event repository")).not.toHaveLength(
+      0,
+    );
+    expect(screen.getByText("agy · CLI")).toBeInTheDocument();
+    expect(screen.getByText("opencode · CLI")).toBeInTheDocument();
     expect(screen.getByText("Workspace match: true")).toBeInTheDocument();
     expect(screen.getByText("Content similarity: 64%")).toBeInTheDocument();
+    expect(
+      screen.getByText("Shared keywords: canonical, event, migration"),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Link candidate" }));
     await waitFor(() =>
       expect(api.reviewCorrelationCandidate).toHaveBeenCalledWith(
@@ -305,6 +345,33 @@ describe("Session timeline", () => {
         "accept",
       ),
     );
+  });
+
+  it("keeps a large correlation queue bounded and searchable", async () => {
+    const candidates = Array.from({ length: 7 }, (_, index) => ({
+      id: `candidate-${index}`,
+      left_native_session_id: `agy:left-${index}`,
+      right_native_session_id: `opencode:right-${index}`,
+      target_global_session_id: "gs-1",
+      score: 0.7 - index / 100,
+      status: "pending" as const,
+      evidence: [],
+    }));
+    const api = client({
+      listCorrelationCandidates: vi.fn().mockResolvedValue(candidates),
+    });
+    render(<App client={api} />);
+
+    expect(await screen.findByText("7 pending")).toBeInTheDocument();
+    expect(screen.getAllByText(/% match$/)).toHaveLength(5);
+    fireEvent.click(screen.getByRole("button", { name: "Show more matches" }));
+    expect(screen.getAllByText(/% match$/)).toHaveLength(7);
+
+    fireEvent.change(screen.getByLabelText("Filter correlation candidates"), {
+      target: { value: "left-6" },
+    });
+    expect(screen.getAllByText(/% match$/)).toHaveLength(1);
+    expect(screen.getByText("agy:left-6")).toBeInTheDocument();
   });
 
   it("shows loading, empty, stale, and recoverable error states", async () => {

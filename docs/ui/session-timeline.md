@@ -13,7 +13,9 @@ flowchart LR
     merge --> timeline["Accessible timeline"]
     search["Authenticated FTS5 keyword search"] --> matches["Tool + session matches"]
     matches --> timeline
-    candidates["Explainable correlation candidates"] --> review["Accept or reject"]
+    candidates["Explainable correlation candidates"] --> context["Thread titles + tools + dates"]
+    context --> evidence["Workspace + time + shared keywords"]
+    evidence --> review["Accept or reject"]
     review --> timeline
     timeline --> warning["Explicit sensitive-data warning"]
     warning --> detail["Canonical event detail"]
@@ -63,9 +65,19 @@ The OCI image already uses `/usr/share/sessionmesh/web`.
 - Keyword search spans all imported canonical events and labels every match
   with its agent tool, native session ID, event kind, excerpt, and provenance
   path. Selecting a result opens that native session.
-- Correlation Review shows the two native session IDs, target global context,
-  percentage score, and each workspace, time, and content signal. Accept and
-  reject actions are authenticated, audited, and immediately persisted.
+- Correlation Review is a collapsible queue that initially renders at most five
+  pending candidates. A local filter matches thread titles, tool families, and
+  native IDs; additional results are disclosed in bounded five-item steps.
+- Every percentage explicitly compares two context cards. Each card shows the
+  tool and surface, thread title, latest observed date, normalized size, event
+  count, and native ID. The expandable score explanation shows workspace
+  agreement, temporal distance, lexical similarity, and up to twelve
+  deterministic shared keywords. The daemon recomputes pending derived
+  evidence after startup so stored candidates adopt the current explainability
+  schema; manually accepted or rejected decisions remain unchanged.
+- Accept and reject actions remain authenticated, audited, and immediately
+  persisted. Accepting creates reference-only global-session membership; it
+  does not merge or mutate native transcripts.
 - The layout becomes a horizontally scrollable session selector on narrow
   screens and honors reduced-motion preferences.
 

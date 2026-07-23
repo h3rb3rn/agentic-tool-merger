@@ -223,6 +223,7 @@ async fn reconcile_and_refresh(
     let mut memberships = state.storage().list_all_session_members().await?;
     let globals = state.storage().list_global_sessions().await?;
     let mut touched = BTreeSet::new();
+    refresh_pending_candidate_evidence(state.storage(), &summaries).await?;
     for summary in &summaries {
         if memberships
             .iter()
@@ -332,6 +333,48 @@ async fn reconcile_and_refresh(
     Ok(())
 }
 
+/// Recomputes review-only evidence when its explainability schema evolves.
+///
+/// Pending candidates are derived state and may be safely recalculated from
+/// immutable canonical events. Accepted and rejected candidates represent
+/// durable user decisions, so this refresh deliberately leaves them unchanged.
+async fn refresh_pending_candidate_evidence(
+    storage: &Storage,
+    summaries: &[SessionSummary],
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    for candidate in storage
+        .list_correlation_candidates()
+        .await?
+        .into_iter()
+        .filter(|candidate| candidate.status == "pending")
+    {
+        let Some(left) = summaries
+            .iter()
+            .find(|summary| summary.id == candidate.left_native_session_id)
+        else {
+            continue;
+        };
+        let Some(right) = summaries
+            .iter()
+            .find(|summary| summary.id == candidate.right_native_session_id)
+        else {
+            continue;
+        };
+        let evidence = correlation_evidence(left, right);
+        storage
+            .upsert_correlation_candidate(&StoredCorrelationCandidate {
+                id: candidate.id,
+                left_native_session_id: candidate.left_native_session_id,
+                right_native_session_id: candidate.right_native_session_id,
+                score: evidence.score,
+                status: "pending".to_owned(),
+                evidence: evidence.details,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
 async fn session_summaries(
     storage: &Storage,
 ) -> Result<Vec<SessionSummary>, Box<dyn Error + Send + Sync>> {
@@ -415,6 +458,12 @@ fn correlation_evidence(left: &SessionSummary, right: &SessionSummary) -> Correl
     let same_workspace = left.cwd.is_some() && left.cwd == right.cwd;
     let gap_seconds = temporal_gap(left, right);
     let temporally_close = gap_seconds <= 7 * 24 * 60 * 60;
+    let shared_terms = left
+        .content_terms
+        .intersection(&right.content_terms)
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>();
     let intersection = left
         .content_terms
         .intersection(&right.content_terms)
@@ -438,7 +487,13 @@ fn correlation_evidence(left: &SessionSummary, right: &SessionSummary) -> Correl
     let details = vec![
         serde_json::json!({"signal":"workspace","matched":same_workspace,"weight":workspace_score}).to_string(),
         serde_json::json!({"signal":"temporal_gap","seconds":gap_seconds,"matched":temporally_close,"weight":temporal_score}).to_string(),
-        serde_json::json!({"signal":"content_jaccard","similarity":similarity,"shared_terms":intersection,"weight":content_score}).to_string(),
+        serde_json::json!({
+            "signal":"content_jaccard",
+            "similarity":similarity,
+            "shared_term_count":intersection,
+            "shared_terms":shared_terms,
+            "weight":content_score
+        }).to_string(),
     ];
     CorrelationEvidence {
         score,
@@ -628,6 +683,18 @@ mod tests {
                 .details
                 .iter()
                 .any(|detail| detail.contains("content_jaccard"))
+        );
+        let content_evidence = same_work_evidence
+            .details
+            .iter()
+            .find_map(|detail| {
+                let value = serde_json::from_str::<serde_json::Value>(detail).ok()?;
+                (value["signal"] == "content_jaccard").then_some(value)
+            })
+            .expect("content evidence should be present");
+        assert_eq!(
+            content_evidence["shared_terms"],
+            serde_json::json!(["parser", "session"])
         );
     }
 

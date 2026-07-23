@@ -258,26 +258,136 @@ aside nav {
 }
 
 .correlation-review {
-  display: grid;
-  gap: 0.8rem;
   margin-top: 1.5rem;
   padding-top: 1.2rem;
   border-top: 1px solid #294142;
 }
 
+.correlation-review > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.correlation-review > summary::-webkit-details-marker {
+  display: none;
+}
+
+.correlation-review > summary::before {
+  content: "›";
+  color: #5eead4;
+  font-size: 1.3rem;
+  transition: transform 120ms ease;
+}
+
+.correlation-review[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.correlation-review > summary h2 {
+  flex: 1;
+  margin: 0;
+}
+
+.correlation-review > summary span,
+.correlation-review > small,
+.correlation-intro {
+  color: #8fa4a4;
+  font-size: 0.78rem;
+}
+
+.correlation-intro {
+  line-height: 1.5;
+}
+
+.correlation-filter {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.8rem 0;
+  font-size: 0.78rem;
+}
+
+.correlation-filter input,
+.show-more-correlations {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.5rem;
+}
+
 .correlation-review article {
+  display: grid;
+  gap: 0.75rem;
+  margin-bottom: 0.8rem;
   padding: 0.75rem;
   border: 1px solid #294142;
   border-radius: 0.55rem;
   background: #0a1819;
 }
 
-.correlation-review article p {
-  margin: 0.3rem 0;
-  overflow-wrap: anywhere;
+.correlation-score {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
 }
 
-.correlation-review ul {
+.correlation-score strong {
+  color: #5eead4;
+  font-size: 1.05rem;
+}
+
+.correlation-score span,
+.correlation-session span,
+.correlation-session small {
+  color: #8fa4a4;
+  font-size: 0.72rem;
+}
+
+.correlation-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.correlation-pair > span {
+  color: #5eead4;
+}
+
+.correlation-session {
+  display: grid;
+  min-width: 0;
+  gap: 0.3rem;
+  padding: 0.6rem;
+  border-radius: 0.4rem;
+  background: #102122;
+}
+
+.correlation-session strong,
+.correlation-session small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.correlation-session small {
+  white-space: nowrap;
+}
+
+.correlation-evidence {
+  border-top: 1px solid #294142;
+  padding-top: 0.6rem;
+}
+
+.correlation-evidence summary {
+  cursor: pointer;
+  color: #bdd1d0;
+  font-size: 0.78rem;
+}
+
+.correlation-evidence ul {
   padding-left: 1.2rem;
   color: #8fa4a4;
   font-size: 0.78rem;
@@ -553,6 +663,15 @@ pre {
   .content-search > div {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .correlation-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .correlation-pair > span {
+    justify-self: center;
+    transform: rotate(90deg);
   }
 
   .event-title {

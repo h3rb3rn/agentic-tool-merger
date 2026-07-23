@@ -356,7 +356,10 @@ function Timeline({ client }: { client: SessionMeshClient }) {
             })}
           </nav>
           <GlobalSessionReview client={client} nativeSessionId={effectiveId} />
-          <CorrelationReview client={client} />
+          <CorrelationReview
+            client={client}
+            sessions={sessions.data?.items ?? []}
+          />
         </aside>
         <section className="timeline-panel" aria-labelledby="timeline-heading">
           <form
@@ -508,8 +511,18 @@ function Timeline({ client }: { client: SessionMeshClient }) {
   );
 }
 
-function CorrelationReview({ client }: { client: SessionMeshClient }) {
+const CORRELATION_PAGE_SIZE = 5;
+
+function CorrelationReview({
+  client,
+  sessions,
+}: {
+  client: SessionMeshClient;
+  sessions: NativeSession[];
+}) {
   const cache = useQueryClient();
+  const [filter, setFilter] = useState("");
+  const [visibleCount, setVisibleCount] = useState(CORRELATION_PAGE_SIZE);
   const candidates = useQuery({
     queryKey: ["correlation-candidates"],
     queryFn: () => client.listCorrelationCandidates(),
@@ -519,31 +532,91 @@ function CorrelationReview({ client }: { client: SessionMeshClient }) {
     await cache.invalidateQueries({ queryKey: ["correlation-candidates"] });
     await cache.invalidateQueries({ queryKey: ["global-sessions"] });
   };
-  const pending =
-    candidates.data?.filter((candidate) => candidate.status === "pending") ??
-    [];
+  const pending = useMemo(
+    () =>
+      candidates.data?.filter((candidate) => candidate.status === "pending") ??
+      [],
+    [candidates.data],
+  );
+  const sessionsById = useMemo(
+    () => new Map(sessions.map((session) => [session.id, session])),
+    [sessions],
+  );
+  const filtered = useMemo(() => {
+    const query = filter.trim().toLocaleLowerCase();
+    if (!query) return pending;
+    return pending.filter((candidate) => {
+      const related = [
+        sessionsById.get(candidate.left_native_session_id),
+        sessionsById.get(candidate.right_native_session_id),
+      ];
+      return [
+        candidate.left_native_session_id,
+        candidate.right_native_session_id,
+        ...related.flatMap((session) =>
+          session ? [session.thread_title, session.tool_family] : [],
+        ),
+      ].some((value) => value.toLocaleLowerCase().includes(query));
+    });
+  }, [filter, pending, sessionsById]);
+  const visible = filtered.slice(0, visibleCount);
+
   return (
-    <section
-      className="correlation-review"
-      aria-labelledby="correlation-review-heading"
-    >
-      <h2 id="correlation-review-heading">Correlation review</h2>
+    <details className="correlation-review" open>
+      <summary>
+        <h2 id="correlation-review-heading">Correlation review</h2>
+        <span>{pending.length} pending</span>
+      </summary>
+      <p className="correlation-intro">
+        Each score compares the two sessions below. Review the contributing
+        signals before linking them into one global context.
+      </p>
       {candidates.isPending && <p role="status">Loading candidates…</p>}
       {pending.length === 0 && !candidates.isPending && (
         <p>No uncertain candidates</p>
       )}
-      {pending.map((candidate) => (
+      {pending.length > 0 && (
+        <label className="correlation-filter">
+          Filter correlation candidates
+          <input
+            type="search"
+            value={filter}
+            onChange={(event) => {
+              setFilter(event.target.value);
+              setVisibleCount(CORRELATION_PAGE_SIZE);
+            }}
+            placeholder="Thread title, tool, or native ID"
+          />
+        </label>
+      )}
+      {filter && filtered.length === 0 && <p>No matching candidates</p>}
+      {visible.map((candidate) => (
         <article key={candidate.id}>
-          <strong>{Math.round(candidate.score * 100)}% match</strong>
-          <p>{candidate.left_native_session_id}</p>
-          <p>↔ {candidate.right_native_session_id}</p>
-          <ul>
-            {candidate.evidence.map((evidence, index) => (
-              <li key={`${candidate.id}-${index}`}>
-                {formatEvidence(evidence)}
-              </li>
-            ))}
-          </ul>
+          <div className="correlation-score">
+            <strong>{Math.round(candidate.score * 100)}% match</strong>
+            <span>Combined confidence</span>
+          </div>
+          <div className="correlation-pair">
+            <CorrelationSession
+              session={sessionsById.get(candidate.left_native_session_id)}
+              nativeId={candidate.left_native_session_id}
+            />
+            <span aria-hidden="true">↔</span>
+            <CorrelationSession
+              session={sessionsById.get(candidate.right_native_session_id)}
+              nativeId={candidate.right_native_session_id}
+            />
+          </div>
+          <details className="correlation-evidence">
+            <summary>Why this score?</summary>
+            <ul>
+              {candidate.evidence.flatMap((evidence, index) =>
+                formatEvidence(evidence).map((line, lineIndex) => (
+                  <li key={`${candidate.id}-${index}-${lineIndex}`}>{line}</li>
+                )),
+              )}
+            </ul>
+          </details>
           <div className="review-actions">
             <button
               type="button"
@@ -560,20 +633,90 @@ function CorrelationReview({ client }: { client: SessionMeshClient }) {
           </div>
         </article>
       ))}
-    </section>
+      {visibleCount < filtered.length && (
+        <button
+          type="button"
+          className="show-more-correlations"
+          onClick={() =>
+            setVisibleCount((count) => count + CORRELATION_PAGE_SIZE)
+          }
+        >
+          Show more matches
+        </button>
+      )}
+      {visible.length > 0 && (
+        <small>
+          Showing {visible.length} of {filtered.length} matching candidates
+        </small>
+      )}
+    </details>
   );
 }
 
-function formatEvidence(evidence: Record<string, unknown>): string {
+function CorrelationSession({
+  session,
+  nativeId,
+}: {
+  session: NativeSession | undefined;
+  nativeId: string;
+}) {
+  if (!session) {
+    return (
+      <div className="correlation-session">
+        <strong>{nativeId}</strong>
+        <small>Session metadata unavailable</small>
+      </div>
+    );
+  }
+  const timestamp = session.ended_at ?? session.started_at;
+  return (
+    <div className="correlation-session">
+      <span className="tool-badge">
+        {session.tool_family} · {session.surface.toLocaleUpperCase()}
+      </span>
+      <strong>{session.thread_title}</strong>
+      <span>
+        {timestamp
+          ? new Intl.DateTimeFormat(undefined, {
+              dateStyle: "medium",
+              timeStyle: "short",
+            }).format(new Date(timestamp))
+          : "Unknown date"}
+      </span>
+      <span>
+        {formatBytes(session.content_bytes)} · {session.event_count} events
+      </span>
+      <small title={nativeId}>{nativeId}</small>
+    </div>
+  );
+}
+
+function formatEvidence(evidence: Record<string, unknown>): string[] {
   const signal = String(evidence.signal ?? "signal");
   if (signal === "workspace")
-    return `Workspace match: ${String(evidence.matched)}`;
+    return [`Workspace match: ${String(evidence.matched)}`];
   if (signal === "temporal_gap")
-    return `Time gap: ${String(evidence.seconds)} seconds`;
+    return [`Time gap: ${String(evidence.seconds)} seconds`];
   if (signal === "content_jaccard") {
-    return `Content similarity: ${Math.round(Number(evidence.similarity ?? 0) * 100)}%`;
+    const sharedTerms = Array.isArray(evidence.shared_terms)
+      ? evidence.shared_terms.map(String)
+      : [];
+    const legacySharedTermCount =
+      typeof evidence.shared_terms === "number"
+        ? Number(evidence.shared_terms)
+        : 0;
+    return [
+      `Content similarity: ${Math.round(Number(evidence.similarity ?? 0) * 100)}%`,
+      ...(sharedTerms.length > 0
+        ? [`Shared keywords: ${sharedTerms.join(", ")}`]
+        : legacySharedTermCount > 0
+          ? [
+              `Shared keywords: ${legacySharedTermCount} terms (recalculation pending)`,
+            ]
+          : []),
+    ];
   }
-  return JSON.stringify(evidence);
+  return [JSON.stringify(evidence)];
 }
 
 function GlobalSessionReview({
