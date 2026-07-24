@@ -135,6 +135,7 @@ h2 {
 }
 
 aside {
+  min-width: 0;
   padding: 1.5rem 1rem 2rem 0;
   border-right: 1px solid #294142;
 }
@@ -143,6 +144,109 @@ aside nav {
   display: grid;
   gap: 0.55rem;
   margin-top: 1rem;
+  max-height: 58vh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 0.35rem;
+  scrollbar-gutter: stable;
+}
+
+.session-navigation-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.session-navigation-heading span,
+.tool-branch > summary span,
+.session-group > summary span:last-child {
+  min-width: 1.8rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 99rem;
+  color: #b8caca;
+  background: #162829;
+  font-size: 0.72rem;
+  text-align: center;
+}
+
+.session-filter {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 1rem;
+  color: #8fa4a4;
+  font-size: 0.75rem;
+}
+
+.session-filter input {
+  min-width: 0;
+  padding: 0.65rem;
+}
+
+.session-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.55rem;
+  margin-top: 1rem;
+}
+
+.session-controls label {
+  display: grid;
+  gap: 0.3rem;
+  color: #8fa4a4;
+  font-size: 0.75rem;
+}
+
+.session-controls select {
+  min-width: 0;
+  padding: 0.5rem;
+}
+
+.tool-branch,
+.session-group {
+  border: 1px solid #294142;
+  border-radius: 0.55rem;
+  background: #091617;
+}
+
+.tool-branch > summary,
+.session-group > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.65rem 0.75rem;
+  cursor: pointer;
+}
+
+.tool-branch > summary {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #0d1c1d;
+  text-transform: capitalize;
+}
+
+.tool-branch[open] > summary,
+.session-group[open] > summary {
+  color: #5eead4;
+}
+
+.session-group {
+  margin: 0.4rem;
+  border-color: #1f3838;
+}
+
+.session-group > summary {
+  color: #a9b8b8;
+  font-size: 0.75rem;
+}
+
+.session-group > div {
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  gap: 0.35rem;
+  padding: 0 0.4rem 0.4rem;
 }
 
 .global-review {
@@ -153,15 +257,156 @@ aside nav {
   border-top: 1px solid #294142;
 }
 
+.correlation-review {
+  margin-top: 1.5rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid #294142;
+}
+
+.correlation-review > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.correlation-review > summary::-webkit-details-marker {
+  display: none;
+}
+
+.correlation-review > summary::before {
+  content: "›";
+  color: #5eead4;
+  font-size: 1.3rem;
+  transition: transform 120ms ease;
+}
+
+.correlation-review[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.correlation-review > summary h2 {
+  flex: 1;
+  margin: 0;
+}
+
+.correlation-review > summary span,
+.correlation-review > small,
+.correlation-intro {
+  color: #8fa4a4;
+  font-size: 0.78rem;
+}
+
+.correlation-intro {
+  line-height: 1.5;
+}
+
+.correlation-filter {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.8rem 0;
+  font-size: 0.78rem;
+}
+
+.correlation-filter input,
+.show-more-correlations {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.5rem;
+}
+
+.correlation-review article {
+  display: grid;
+  gap: 0.75rem;
+  margin-bottom: 0.8rem;
+  padding: 0.75rem;
+  border: 1px solid #294142;
+  border-radius: 0.55rem;
+  background: #0a1819;
+}
+
+.correlation-score {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.correlation-score strong {
+  color: #5eead4;
+  font-size: 1.05rem;
+}
+
+.correlation-score span,
+.correlation-session span,
+.correlation-session small {
+  color: #8fa4a4;
+  font-size: 0.72rem;
+}
+
+.correlation-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.correlation-pair > span {
+  color: #5eead4;
+}
+
+.correlation-session {
+  display: grid;
+  min-width: 0;
+  gap: 0.3rem;
+  padding: 0.6rem;
+  border-radius: 0.4rem;
+  background: #102122;
+}
+
+.correlation-session strong,
+.correlation-session small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.correlation-session small {
+  white-space: nowrap;
+}
+
+.correlation-evidence {
+  border-top: 1px solid #294142;
+  padding-top: 0.6rem;
+}
+
+.correlation-evidence summary {
+  cursor: pointer;
+  color: #bdd1d0;
+  font-size: 0.78rem;
+}
+
+.correlation-evidence ul {
+  padding-left: 1.2rem;
+  color: #8fa4a4;
+  font-size: 0.78rem;
+}
+
 .global-review form,
 .global-review label,
 .review-actions {
+  min-width: 0;
   display: grid;
   gap: 0.45rem;
 }
 
 .global-review input,
-.global-review button {
+.global-review select,
+.global-review button,
+.review-actions button {
+  width: 100%;
+  min-width: 0;
   min-height: 2.5rem;
   padding: 0.5rem 0.65rem;
 }
@@ -170,7 +415,7 @@ aside nav {
   display: grid;
   gap: 0.25rem;
   width: 100%;
-  padding: 0.9rem;
+  padding: 0.65rem 0.7rem;
   text-align: left;
 }
 
@@ -181,6 +426,10 @@ time {
   font-size: 0.8rem;
 }
 
+.session strong {
+  overflow-wrap: anywhere;
+}
+
 .session.active {
   border-color: #5eead4;
   background: #12302f;
@@ -189,6 +438,67 @@ time {
 .timeline-panel {
   min-width: 0;
   padding: 1.5rem 0 4rem 1.5rem;
+}
+
+.content-search {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 1.5rem;
+}
+
+.content-search > div {
+  display: flex;
+  gap: 0.55rem;
+}
+
+.content-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.65rem 0.8rem;
+}
+
+.content-search button,
+.search-results button {
+  padding: 0.65rem 0.85rem;
+}
+
+.search-results {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  border: 1px solid #294142;
+  border-radius: 0.7rem;
+  background: rgb(10 24 25 / 88%);
+}
+
+.search-results ol {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.search-results button {
+  display: grid;
+  gap: 0.35rem;
+  width: 100%;
+  text-align: left;
+}
+
+.search-results p,
+.search-results small {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.tool-badge {
+  width: max-content;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  color: #042f2e;
+  background: #5eead4;
+  font-size: 0.72rem;
+  font-weight: 700;
 }
 
 .timeline-heading {
@@ -286,6 +596,28 @@ select {
   color: #fde68a;
 }
 
+.event-content {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.8rem;
+}
+
+.event-content pre {
+  margin-top: 0.3rem;
+}
+
+.event-content summary {
+  cursor: pointer;
+  color: #a9b8b8;
+}
+
+.event-source {
+  margin: 0;
+  color: #8fa4a4;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
 .warning button + button {
   margin-left: 0.5rem;
 }
@@ -320,14 +652,26 @@ pre {
   }
 
   aside nav {
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(14rem, 80%);
-    overflow-x: auto;
+    max-height: 65vh;
     padding-bottom: 0.5rem;
   }
 
   .timeline-panel {
     padding-left: 0;
+  }
+
+  .content-search > div {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .correlation-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .correlation-pair > span {
+    justify-self: center;
+    transform: rotate(90deg);
   }
 
   .event-title {

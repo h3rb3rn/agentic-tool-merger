@@ -222,6 +222,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/native-sessions", get(native_sessions))
         .route("/api/v1/native-sessions/{id}", get(native_session))
         .route("/api/v1/events", get(events))
+        .route("/api/v1/events/search", get(search_events))
         .route("/api/v1/events/{id}", get(event_detail))
         .route("/api/v1/events/stream", get(event_stream))
         .route(
@@ -236,6 +237,14 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/api/v1/correlations/accept", post(accept_correlation))
         .route("/api/v1/correlations/reject", post(reject_correlation))
+        .route(
+            "/api/v1/correlation-candidates",
+            get(correlation_candidates),
+        )
+        .route(
+            "/api/v1/correlation-candidates/{id}/{decision}",
+            post(review_correlation_candidate),
+        )
         .route(
             "/api/v1/handoffs/{global_id}",
             get(get_handoff).post(refresh_handoff),
@@ -315,6 +324,7 @@ async fn native_sessions(
     let limit = page_size(query.limit)?;
     let after = decode_cursor(query.cursor.as_deref(), "session")?;
     let sessions = state.storage.list_native_sessions().await?;
+    let events = state.storage.list_canonical_events().await?;
     if let Some(cursor) = &after
         && !sessions.iter().any(|session| session.id == *cursor)
     {
@@ -325,6 +335,7 @@ async fn native_sessions(
         after.as_deref(),
         limit,
         query.tool_family.as_deref(),
+        &events,
     )))
 }
 
@@ -341,18 +352,12 @@ pub struct SessionSummary {
     pub started_at: Option<String>,
     /// End timestamp if observed.
     pub ended_at: Option<String>,
-}
-
-impl From<StoredNativeSession> for SessionSummary {
-    fn from(session: StoredNativeSession) -> Self {
-        Self {
-            id: session.id,
-            tool_family: session.tool_family,
-            surface: session.surface,
-            started_at: session.started_at,
-            ended_at: session.ended_at,
-        }
-    }
+    /// Native title or a bounded first-message fallback.
+    pub thread_title: String,
+    /// Number of normalized events in this native session.
+    pub event_count: usize,
+    /// Approximate normalized content size in bytes.
+    pub content_bytes: usize,
 }
 
 fn page_sessions(
@@ -360,6 +365,7 @@ fn page_sessions(
     after: Option<&str>,
     limit: usize,
     family: Option<&str>,
+    events: &[CanonicalEvent],
 ) -> Page<SessionSummary> {
     let mut matching = sessions
         .into_iter()
@@ -377,7 +383,10 @@ fn page_sessions(
         })
         .flatten();
     Page {
-        items: matching.into_iter().map(SessionSummary::from).collect(),
+        items: matching
+            .into_iter()
+            .map(|session| summarize_session(session, events))
+            .collect(),
         next_cursor,
     }
 }
@@ -388,13 +397,61 @@ async fn native_session(
     Path(id): Path<String>,
 ) -> Result<Json<SessionSummary>, ApiError> {
     authorize(&state, &headers)?;
-    state
+    let session = state
         .storage
         .get_native_session(&id)
         .await?
-        .map(SessionSummary::from)
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or(ApiError::NotFound)?;
+    let events = state.storage.list_canonical_events().await?;
+    Ok(Json(summarize_session(session, &events)))
+}
+
+fn summarize_session(session: StoredNativeSession, events: &[CanonicalEvent]) -> SessionSummary {
+    let session_events = events
+        .iter()
+        .filter(|event| event.native_session_id == session.id)
+        .collect::<Vec<_>>();
+    let thread_title = session_events
+        .iter()
+        .find_map(|event| {
+            ["thread_title", "title", "name"]
+                .into_iter()
+                .find_map(|key| event.payload.get(key)?.as_str())
+        })
+        .or_else(|| {
+            session_events
+                .iter()
+                .find(|event| event.kind == EventKind::UserMessage)
+                .and_then(|event| event.payload.get("text")?.as_str())
+        })
+        .map(|title| bounded_title(title, 80))
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| session.id.clone());
+    let content_bytes = session_events
+        .iter()
+        .map(|event| event.to_json().map_or(0, |json| json.len()))
+        .sum();
+    SessionSummary {
+        id: session.id,
+        tool_family: session.tool_family,
+        surface: session.surface,
+        started_at: session.started_at,
+        ended_at: session.ended_at,
+        thread_title,
+        event_count: session_events.len(),
+        content_bytes,
+    }
+}
+
+fn bounded_title(title: &str, limit: usize) -> String {
+    let compact = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut characters = compact.chars();
+    let title = characters.by_ref().take(limit).collect::<String>();
+    if characters.next().is_some() {
+        format!("{title}…")
+    } else {
+        title
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -441,6 +498,87 @@ async fn event_detail(
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchQuery {
+    query: String,
+    limit: Option<usize>,
+}
+
+/// Authenticated cross-tool full-text search result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SearchResult {
+    /// Deterministic event ID.
+    pub event_id: String,
+    /// Native session containing the match.
+    pub native_session_id: String,
+    /// Agent tool family owning the native session.
+    pub tool_family: String,
+    /// Canonical event kind.
+    pub kind: String,
+    /// Original event timestamp.
+    pub timestamp: String,
+    /// Human-readable normalized content excerpt.
+    pub content: String,
+    /// Native source path retained for provenance.
+    pub source_path: String,
+}
+
+async fn search_events(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<Vec<SearchResult>>, ApiError> {
+    authorize(&state, &headers)?;
+    let expression = keyword_expression(&query.query)?;
+    let limit = page_size(query.limit)?.min(100);
+    let events = state.storage.search_events(&expression, limit, 0).await?;
+    let mut results = Vec::with_capacity(events.len());
+    for event in events {
+        let session = state
+            .storage
+            .get_native_session(&event.native_session_id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        results.push(SearchResult {
+            event_id: event.event_id.as_str().to_owned(),
+            native_session_id: event.native_session_id,
+            tool_family: session.tool_family,
+            kind: kind_name(event.kind).to_owned(),
+            timestamp: event.timestamp.as_str().to_owned(),
+            content: event_content(&event.payload),
+            source_path: event.provenance.source_path,
+        });
+    }
+    Ok(Json(results))
+}
+
+fn keyword_expression(query: &str) -> Result<String, ApiError> {
+    let query = query.trim();
+    if query.is_empty() || query.len() > 256 {
+        return Err(ApiError::InvalidInput);
+    }
+    let terms = query
+        .split_whitespace()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        return Err(ApiError::InvalidInput);
+    }
+    Ok(terms.join(" AND "))
+}
+
+fn event_content(payload: &BTreeMap<String, serde_json::Value>) -> String {
+    const CONTENT_FIELDS: [&str; 6] = ["text", "command", "stdout", "output", "content", "message"];
+    let content = CONTENT_FIELDS
+        .iter()
+        .find_map(|field| payload.get(*field).and_then(serde_json::Value::as_str))
+        .map_or_else(
+            || serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_owned()),
+            ToOwned::to_owned,
+        );
+    content.chars().take(1_000).collect()
 }
 
 /// Global session projection with reference-only membership and audit data.
@@ -710,6 +848,139 @@ async fn reject_correlation(
             created_at: &now_rfc3339(),
         })
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Explainable correlation candidate projection for local review.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CorrelationCandidateSummary {
+    /// Candidate identity.
+    pub id: String,
+    /// Proposed session to add to the target global context.
+    pub left_native_session_id: String,
+    /// Existing related session.
+    pub right_native_session_id: String,
+    /// Existing related session's global context.
+    pub target_global_session_id: Option<String>,
+    /// Combined confidence score.
+    pub score: f64,
+    /// Pending, accepted, or rejected.
+    pub status: String,
+    /// Structured explainable signals.
+    pub evidence: Vec<serde_json::Value>,
+}
+
+async fn correlation_candidates(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<CorrelationCandidateSummary>>, ApiError> {
+    authorize(&state, &headers)?;
+    let memberships = state.storage.list_all_session_members().await?;
+    let candidates = state
+        .storage
+        .list_correlation_candidates()
+        .await?
+        .into_iter()
+        .map(|candidate| CorrelationCandidateSummary {
+            target_global_session_id: memberships
+                .iter()
+                .find(|member| member.native_session_id == candidate.right_native_session_id)
+                .map(|member| member.global_session_id.clone()),
+            id: candidate.id,
+            left_native_session_id: candidate.left_native_session_id,
+            right_native_session_id: candidate.right_native_session_id,
+            score: candidate.score,
+            status: candidate.status,
+            evidence: candidate
+                .evidence
+                .into_iter()
+                .filter_map(|evidence| serde_json::from_str(&evidence).ok())
+                .collect(),
+        })
+        .collect();
+    Ok(Json(candidates))
+}
+
+async fn review_correlation_candidate(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path((id, decision)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    authorize(&state, &headers)?;
+    if !matches!(decision.as_str(), "accept" | "reject") {
+        return Err(ApiError::InvalidInput);
+    }
+    let candidate = state
+        .storage
+        .list_correlation_candidates()
+        .await?
+        .into_iter()
+        .find(|candidate| candidate.id == id)
+        .ok_or(ApiError::NotFound)?;
+    let memberships = state.storage.list_all_session_members().await?;
+    let target = memberships
+        .iter()
+        .find(|member| member.native_session_id == candidate.right_native_session_id)
+        .ok_or(ApiError::NotFound)?;
+    if decision == "accept" {
+        let reviewed_at = now_rfc3339();
+        for seed in memberships.iter().filter(|member| {
+            member.native_session_id == candidate.left_native_session_id
+                && member.global_session_id != target.global_session_id
+                && member.correlation_version == "automatic-seed-v1"
+        }) {
+            state
+                .storage
+                .unlink_session(&MembershipDecision {
+                    global_session_id: &seed.global_session_id,
+                    native_session_id: &candidate.left_native_session_id,
+                    actor: "authenticated-local-user",
+                    reason: Some("replaced isolated automatic seed after candidate acceptance"),
+                    created_at: &reviewed_at,
+                })
+                .await?;
+        }
+        state
+            .storage
+            .link_session(
+                &MembershipDecision {
+                    global_session_id: &target.global_session_id,
+                    native_session_id: &candidate.left_native_session_id,
+                    actor: "authenticated-local-user",
+                    reason: Some("accepted explainable correlation candidate"),
+                    created_at: &reviewed_at,
+                },
+                candidate.score,
+                "manual-candidate-v1",
+            )
+            .await?;
+        state
+            .storage
+            .set_correlation_candidate_status(&id, "accepted")
+            .await?;
+        // Membership and review are the authoritative transaction. A handoff
+        // refresh is derived work and must not turn a committed review into an
+        // apparent failure; the ingestion reconciler retries derived state.
+        let _ = state
+            .refresh_global_handoff(&target.global_session_id)
+            .await;
+    } else {
+        let reviewed_at = now_rfc3339();
+        state
+            .storage
+            .reject_membership(&MembershipDecision {
+                global_session_id: &target.global_session_id,
+                native_session_id: &candidate.left_native_session_id,
+                actor: "authenticated-local-user",
+                reason: Some("rejected explainable correlation candidate"),
+                created_at: &reviewed_at,
+            })
+            .await?;
+        state
+            .storage
+            .set_correlation_candidate_status(&id, "rejected")
+            .await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1219,6 +1490,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(first_json["items"][0]["id"], "session-a");
+        assert_eq!(first_json["items"][0]["thread_title"], "session-a");
+        assert_eq!(first_json["items"][0]["event_count"], 1);
+        assert!(first_json["items"][0]["content_bytes"].as_u64().unwrap() > 0);
         assert_eq!(json(second).await["items"][0]["id"], "session-b");
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     }
@@ -1268,6 +1542,29 @@ mod tests {
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(body["event_id"], stored.event_id.as_str());
         assert_eq!(body["payload"]["api_key"], "synthetic-secret-value");
+    }
+
+    #[tokio::test]
+    async fn keyword_search_returns_content_session_tool_and_provenance() {
+        let (_directory, state) = state().await;
+        state
+            .storage
+            .store_event(&event("session-search", 1, "2026-07-20T14:30:00Z"))
+            .await
+            .unwrap();
+        let response = router(state)
+            .oneshot(request(
+                "/api/v1/events/search?query=safe%20summary&limit=20",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json(response).await;
+        assert_eq!(body[0]["native_session_id"], "session-search");
+        assert_eq!(body[0]["tool_family"], "codex");
+        assert_eq!(body[0]["content"], "safe summary must exclude this");
+        assert_eq!(body[0]["source_path"], "/sources/codex/rollout.jsonl");
+        assert!(body[0].get("api_key").is_none());
     }
 
     #[tokio::test]
@@ -1423,5 +1720,87 @@ mod tests {
         assert!(body["members"].as_array().unwrap().is_empty());
         assert_eq!(body["audit"].as_array().unwrap().len(), 2);
         assert!(!body.to_string().contains("payload"));
+    }
+
+    #[tokio::test]
+    async fn accepting_candidate_replaces_only_the_automatic_seed() {
+        let (_directory, state) = state().await;
+        for session in ["opencode:right", "agy:left"] {
+            state
+                .storage
+                .store_event(&event(session, 0, "2026-07-22T10:00:00Z"))
+                .await
+                .unwrap();
+        }
+        let timestamp = "2026-07-22T10:01:00Z";
+        for (id, objective) in [
+            ("gs_target", "Shared work"),
+            ("gs_seed", "Imported Agy work"),
+        ] {
+            state
+                .storage
+                .create_global_session(&StoredGlobalSession {
+                    id: id.to_owned(),
+                    objective: objective.to_owned(),
+                    created_at: timestamp.to_owned(),
+                    updated_at: timestamp.to_owned(),
+                })
+                .await
+                .unwrap();
+        }
+        for (global, native, version) in [
+            ("gs_target", "opencode:right", "content-correlation-v1"),
+            ("gs_seed", "agy:left", "automatic-seed-v1"),
+        ] {
+            state
+                .storage
+                .link_session(
+                    &MembershipDecision {
+                        global_session_id: global,
+                        native_session_id: native,
+                        actor: "automatic-correlator",
+                        reason: None,
+                        created_at: timestamp,
+                    },
+                    0.8,
+                    version,
+                )
+                .await
+                .unwrap();
+        }
+        state
+            .storage
+            .upsert_correlation_candidate(&sessionmesh_storage::StoredCorrelationCandidate {
+                id: "candidate_review".to_owned(),
+                left_native_session_id: "agy:left".to_owned(),
+                right_native_session_id: "opencode:right".to_owned(),
+                score: 0.78,
+                status: "pending".to_owned(),
+                evidence: vec![r#"{"signal":"workspace","matched":true}"#.to_owned()],
+            })
+            .await
+            .unwrap();
+
+        let response = router(state.clone())
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/correlation-candidates/candidate_review/accept",
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let members = state.storage.list_all_session_members().await.unwrap();
+        assert!(members.iter().any(|member| {
+            member.global_session_id == "gs_target" && member.native_session_id == "agy:left"
+        }));
+        assert!(!members.iter().any(|member| {
+            member.global_session_id == "gs_seed" && member.native_session_id == "agy:left"
+        }));
+        assert_eq!(
+            state.storage.list_correlation_candidates().await.unwrap()[0].status,
+            "accepted"
+        );
     }
 }

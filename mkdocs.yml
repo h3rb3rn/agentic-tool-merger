@@ -39,6 +39,8 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Getting Started:
+      - First Steps: getting-started/first-steps.md
   - Architecture:
       - Complete Project Plan: architecture/project-plan.md
       - Canonical Events: architecture/canonical-events.md
@@ -70,6 +72,8 @@ nav:
       - Codex Discovery: adapters/codex.md
       - Claude Code: adapters/claude-code.md
       - Continue: adapters/continue.md
+      - OpenCode: adapters/opencode.md
+      - Agy (Antigravity CLI): adapters/agy.md
   - API:
       - REST and SSE: api/rest.md
       - MCP: api/mcp.md

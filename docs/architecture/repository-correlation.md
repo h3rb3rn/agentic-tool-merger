@@ -53,7 +53,39 @@ objectives, and invalid global IDs. Writes use a same-directory temporary file,
 `fsync`, and atomic rename. The file must never contain prompts, transcripts,
 tokens, or credentials.
 
-## Deterministic score
+## Cross-tool content correlation
+
+New native sessions are compared only with sessions from another tool family.
+Algorithm `content-correlation-v1` combines safe, explainable signals:
+
+| Signal                                           | Contribution |
+| ------------------------------------------------ | -----------: |
+| Same normalized workspace                        |         0.65 |
+| Within seven days                                |         0.15 |
+| Lexical content similarity in the same workspace |   up to 0.20 |
+| Lexical content similarity across workspaces     |   up to 0.85 |
+
+Content similarity is deterministic Jaccard overlap over normalized terms. It
+does not send prompts to a model or remote service. Each candidate persists its
+workspace, temporal, and content evidence as structured JSON. Scores at or
+above the configured threshold are linked automatically; lower non-zero scores
+remain in the review queue. Accepted decisions replace only an isolated
+automatic seed, while manual memberships are preserved. Rejections persist and
+block silent relinking.
+
+```mermaid
+flowchart TD
+    new["New native session"] --> compare["Compare other tool families"]
+    compare --> signals["Workspace + time + content signals"]
+    signals --> score["Persist score and evidence"]
+    score --> threshold{"At configured threshold?"}
+    threshold -->|yes| link["Audited automatic link"]
+    threshold -->|no| queue["Correlation review queue"]
+    queue --> accept["Accept and replace automatic seed"]
+    queue --> reject["Reject and persist override"]
+```
+
+## Repository score
 
 Algorithm `deterministic-v1` retains every feature, match result, weight, and
 safe explanation:

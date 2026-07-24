@@ -7,6 +7,28 @@ changes to SessionMesh are recorded here.
 
 ### Added
 
+- Beginner-oriented setup and usage guide covering service checks, connector
+  installation, Web UI authentication, native resume, cross-tool rate-limit
+  handoff, correlation review, manual fallback, and troubleshooting.
+- Read-only OpenCode SQLite ingestion restricted to allowlisted session-content
+  tables and Agy history ingestion that excludes OAuth and credential state.
+- Thread-title session navigation with native metadata and bounded fallbacks,
+  plus topic, date, and normalized-size sorting and grouping.
+- Hierarchical, collapsible tool and session-group navigation with counts,
+  active-branch expansion, local filtering, and a bounded scroll region.
+- Responsive sidebar constraints verified in Chromium at desktop and mobile
+  widths, preventing long global-session labels from widening the page.
+- Bounded, searchable Correlation Review with paired thread context cards,
+  expandable score explanations, and deterministic shared-keyword evidence.
+- Explainable cross-tool content correlation with persisted workspace,
+  temporal, and lexical evidence, configurable automatic linking, and an
+  authenticated accept/reject review interface.
+- Authenticated cross-tool keyword search with tool-family, native-session,
+  normalized content excerpt, and provenance-path results.
+- Human-readable timeline content mode for messages, commands, and results,
+  with one explicit sensitive-data acknowledgement and canonical JSON details.
+- Configurable, interface-specific OCI publication through
+  `SESSIONMESH_PUBLISH_ADDRESS`, including LAN exposure guidance.
 - Automatic cross-tool correlation and handoff refresh, read-only Claude Code
   and Continue adapters, and startup delivery connectors for Codex, Claude
   Code, and Continue.

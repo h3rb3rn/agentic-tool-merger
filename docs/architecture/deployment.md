@@ -89,6 +89,21 @@ service can read them. Before changing these values, migrate an existing
 SessionMesh state volume to the same ownership. This changes only the service
 identity; the source mount remains read-only.
 
+## LAN publication
+
+Compose publishes the Web UI and API only on `127.0.0.1` by default. Set
+`SESSIONMESH_PUBLISH_ADDRESS` to a specific host interface, rather than
+`0.0.0.0`, when LAN access is explicitly required:
+
+```dotenv
+SESSIONMESH_PUBLISH_ADDRESS=192.168.155.225
+```
+
+The resulting URL is `http://192.168.155.225:8787`. Data APIs remain protected
+by the generated bearer token, but the Web UI and health endpoint are reachable
+by hosts that can access that interface. Network firewall policy must restrict
+the port to the trusted LAN; SessionMesh does not add a host firewall rule.
+
 ## Example contract
 
 The exact image name and port are finalized during bootstrap, but the mount

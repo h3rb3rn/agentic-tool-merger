@@ -10,6 +10,7 @@ import "./styles.css";
 import {
   type CanonicalEvent,
   type EventSummary,
+  type NativeSession,
   type SessionMeshClient,
   createApiClient,
 } from "./api";
@@ -74,22 +75,123 @@ function TokenSetup({ onSave }: { onSave: (token: string) => void }) {
   );
 }
 
+type SessionSort = "topic" | "date" | "size";
+type SessionGroup = "none" | SessionSort;
+
+function groupSessions(
+  sessions: NativeSession[],
+  sort: SessionSort,
+  group: SessionGroup,
+) {
+  const sorted = [...sessions].sort((left, right) => {
+    if (sort === "topic") {
+      return left.thread_title.localeCompare(right.thread_title);
+    }
+    if (sort === "size") return right.content_bytes - left.content_bytes;
+    return (right.ended_at ?? right.started_at ?? "").localeCompare(
+      left.ended_at ?? left.started_at ?? "",
+    );
+  });
+  const groups = new Map<string, NativeSession[]>();
+  for (const session of sorted) {
+    const label = sessionGroupLabel(session, group);
+    groups.set(label, [...(groups.get(label) ?? []), session]);
+  }
+  return [...groups].map(([label, groupedSessions]) => ({
+    label,
+    sessions: groupedSessions,
+  }));
+}
+
+function sessionTree(
+  sessions: NativeSession[],
+  sort: SessionSort,
+  group: SessionGroup,
+) {
+  const tools = new Map<string, NativeSession[]>();
+  for (const session of sessions) {
+    tools.set(session.tool_family, [
+      ...(tools.get(session.tool_family) ?? []),
+      session,
+    ]);
+  }
+  return [...tools]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([tool, toolSessions]) => ({
+      tool,
+      count: toolSessions.length,
+      groups: groupSessions(toolSessions, sort, group),
+    }));
+}
+
+function sessionGroupLabel(session: NativeSession, group: SessionGroup) {
+  if (group === "topic") return session.thread_title;
+  if (group === "date") {
+    const timestamp = session.ended_at ?? session.started_at;
+    return timestamp ? timestamp.slice(0, 10) : "Unknown date";
+  }
+  if (group === "size") {
+    if (session.content_bytes < 10_000) return "Small (< 10 KB)";
+    if (session.content_bytes < 100_000) return "Medium (10–100 KB)";
+    return "Large (≥ 100 KB)";
+  }
+  return "All sessions";
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1_000) return `${bytes} B`;
+  if (bytes < 1_000_000) return `${(bytes / 1_000).toFixed(1)} KB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
 function Timeline({ client }: { client: SessionMeshClient }) {
   const cache = useQueryClient();
   const [selectedId, setSelectedId] = useState(
     () => new URLSearchParams(window.location.search).get("session") ?? "",
   );
   const [kind, setKind] = useState("");
+  const [searchText, setSearchText] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showContent, setShowContent] = useState(false);
+  const [confirmingContent, setConfirmingContent] = useState(false);
   const [connected, setConnected] = useState(true);
+  const [sessionSort, setSessionSort] = useState<"topic" | "date" | "size">(
+    "date",
+  );
+  const [sessionGroup, setSessionGroup] = useState<
+    "none" | "topic" | "date" | "size"
+  >("date");
+  const [sessionFilter, setSessionFilter] = useState("");
   const sessions = useQuery({
     queryKey: ["sessions"],
     queryFn: () => client.listSessions(),
   });
   const effectiveId = selectedId || sessions.data?.items[0]?.id || "";
+  const selectedSession = sessions.data?.items.find(
+    (session) => session.id === effectiveId,
+  );
+  const visibleSessions = useMemo(() => {
+    const query = sessionFilter.trim().toLocaleLowerCase();
+    if (!query) return sessions.data?.items ?? [];
+    return (sessions.data?.items ?? []).filter((session) =>
+      [session.thread_title, session.id, session.tool_family].some((value) =>
+        value.toLocaleLowerCase().includes(query),
+      ),
+    );
+  }, [sessionFilter, sessions.data?.items]);
+  const sessionBranches = useMemo(
+    () => sessionTree(visibleSessions, sessionSort, sessionGroup),
+    [sessionGroup, sessionSort, visibleSessions],
+  );
   const events = useQuery({
     queryKey: ["events", effectiveId, kind],
     queryFn: () => client.listEvents(effectiveId, kind || undefined),
     enabled: Boolean(effectiveId),
+  });
+  const search = useQuery({
+    queryKey: ["event-search", searchQuery],
+    queryFn: () => client.searchEvents(searchQuery),
+    enabled: Boolean(searchQuery),
   });
 
   useEffect(() => {
@@ -135,7 +237,52 @@ function Timeline({ client }: { client: SessionMeshClient }) {
       </header>
       <div className="workspace">
         <aside aria-label="Native sessions">
-          <h2>Sessions</h2>
+          <div className="session-navigation-heading">
+            <h2>Sessions</h2>
+            <span>{visibleSessions.length}</span>
+          </div>
+          <label className="session-filter">
+            Filter sessions
+            <input
+              type="search"
+              value={sessionFilter}
+              onChange={(event) => setSessionFilter(event.target.value)}
+              placeholder="Title, tool, or native ID"
+            />
+          </label>
+          <div className="session-controls">
+            <label>
+              Sort by
+              <select
+                value={sessionSort}
+                onChange={(event) =>
+                  setSessionSort(
+                    event.target.value as "topic" | "date" | "size",
+                  )
+                }
+              >
+                <option value="date">Date</option>
+                <option value="topic">Topic</option>
+                <option value="size">Size</option>
+              </select>
+            </label>
+            <label>
+              Group by
+              <select
+                value={sessionGroup}
+                onChange={(event) =>
+                  setSessionGroup(
+                    event.target.value as "none" | "topic" | "date" | "size",
+                  )
+                }
+              >
+                <option value="none">No groups</option>
+                <option value="topic">Topic</option>
+                <option value="date">Date</option>
+                <option value="size">Size</option>
+              </select>
+            </label>
+          </div>
           {sessions.isPending && <p role="status">Loading sessions…</p>}
           {sessions.isError && (
             <ErrorState
@@ -144,34 +291,140 @@ function Timeline({ client }: { client: SessionMeshClient }) {
             />
           )}
           {sessions.data?.items.length === 0 && <p>No native sessions found</p>}
-          <nav>
-            {sessions.data?.items.map((session) => (
-              <button
-                className={
-                  session.id === effectiveId ? "session active" : "session"
-                }
-                key={session.id}
-                onClick={() => setSelectedId(session.id)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    setSelectedId(session.id);
-                  }
-                }}
-              >
-                <strong>{session.id}</strong>
-                <span>
-                  {session.tool_family} · {session.surface}
-                </span>
-              </button>
-            ))}
+          {sessions.data && visibleSessions.length === 0 && (
+            <p>No sessions match this filter</p>
+          )}
+          <nav aria-label="Session hierarchy">
+            {sessionBranches.map((branch) => {
+              const branchIsActive = branch.groups.some((group) =>
+                group.sessions.some((session) => session.id === effectiveId),
+              );
+              return (
+                <details
+                  className="tool-branch"
+                  open={branchIsActive || Boolean(sessionFilter) || undefined}
+                  key={`${branch.tool}:${sessionFilter}`}
+                >
+                  <summary>
+                    <strong>{branch.tool}</strong>
+                    <span>{branch.count}</span>
+                  </summary>
+                  {branch.groups.map((group) => {
+                    const groupIsActive = group.sessions.some(
+                      (session) => session.id === effectiveId,
+                    );
+                    return (
+                      <details
+                        className="session-group"
+                        open={
+                          sessionGroup === "none" ||
+                          groupIsActive ||
+                          Boolean(sessionFilter) ||
+                          undefined
+                        }
+                        key={group.label}
+                      >
+                        <summary>
+                          <span>{group.label}</span>
+                          <span>{group.sessions.length}</span>
+                        </summary>
+                        <div>
+                          {group.sessions.map((session) => (
+                            <button
+                              className={
+                                session.id === effectiveId
+                                  ? "session active"
+                                  : "session"
+                              }
+                              key={session.id}
+                              title={`Native session: ${session.id}`}
+                              onClick={() => setSelectedId(session.id)}
+                            >
+                              <strong>{session.thread_title}</strong>
+                              <span>
+                                {formatBytes(session.content_bytes)} ·{" "}
+                                {session.event_count} events
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </details>
+                    );
+                  })}
+                </details>
+              );
+            })}
           </nav>
           <GlobalSessionReview client={client} nativeSessionId={effectiveId} />
+          <CorrelationReview
+            client={client}
+            sessions={sessions.data?.items ?? []}
+          />
         </aside>
         <section className="timeline-panel" aria-labelledby="timeline-heading">
+          <form
+            className="content-search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              setSearchQuery(searchText.trim());
+            }}
+          >
+            <label htmlFor="session-content-search">
+              Search session content
+            </label>
+            <div>
+              <input
+                id="session-content-search"
+                value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+                placeholder="Keywords across all imported agent tools"
+                required
+              />
+              <button type="submit">Search</button>
+            </div>
+          </form>
+          {search.isFetching && <p role="status">Searching session content…</p>}
+          {search.isError && (
+            <ErrorState
+              message="Search is temporarily unavailable"
+              retry={search.refetch}
+            />
+          )}
+          {searchQuery && search.data?.length === 0 && (
+            <p>No keyword matches</p>
+          )}
+          {search.data && search.data.length > 0 && (
+            <section
+              className="search-results"
+              aria-label="Session search results"
+            >
+              <h2>Cross-tool matches</h2>
+              <ol>
+                {search.data.map((result) => (
+                  <li key={result.event_id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedId(result.native_session_id)}
+                    >
+                      <span className="tool-badge">{result.tool_family}</span>
+                      <strong>{result.native_session_id}</strong>
+                      <span>{eventLabel(result.kind)}</span>
+                      <p>{result.content}</p>
+                      <small>{result.source_path}</small>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )}
           <div className="timeline-heading">
             <div>
               <p className="eyebrow">CHRONOLOGICAL TRACE</p>
-              <h2 id="timeline-heading">{effectiveId || "Select a session"}</h2>
+              <h2 id="timeline-heading">
+                {selectedSession?.thread_title ||
+                  effectiveId ||
+                  "Select a session"}
+              </h2>
             </div>
             <label>
               Event kind
@@ -187,7 +440,41 @@ function Timeline({ client }: { client: SessionMeshClient }) {
                 <option value="error">Errors</option>
               </select>
             </label>
+            <button
+              type="button"
+              className="reveal"
+              onClick={() => setConfirmingContent(true)}
+              disabled={showContent}
+            >
+              {showContent
+                ? "Timeline content visible"
+                : "Show timeline content"}
+            </button>
           </div>
+          {confirmingContent && (
+            <div
+              role="dialog"
+              aria-label="Timeline content warning"
+              className="warning"
+            >
+              <p>
+                Normalized session content and source paths may contain secrets
+                or private data.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowContent(true);
+                  setConfirmingContent(false);
+                }}
+              >
+                Show content now
+              </button>
+              <button type="button" onClick={() => setConfirmingContent(false)}>
+                Cancel
+              </button>
+            </div>
+          )}
           {events.isPending && effectiveId && (
             <p role="status">Loading events…</p>
           )}
@@ -212,6 +499,7 @@ function Timeline({ client }: { client: SessionMeshClient }) {
                     key={event.event_id}
                     event={event}
                     client={client}
+                    revealContent={showContent}
                   />
                 ))}
               </li>
@@ -221,6 +509,214 @@ function Timeline({ client }: { client: SessionMeshClient }) {
       </div>
     </main>
   );
+}
+
+const CORRELATION_PAGE_SIZE = 5;
+
+function CorrelationReview({
+  client,
+  sessions,
+}: {
+  client: SessionMeshClient;
+  sessions: NativeSession[];
+}) {
+  const cache = useQueryClient();
+  const [filter, setFilter] = useState("");
+  const [visibleCount, setVisibleCount] = useState(CORRELATION_PAGE_SIZE);
+  const candidates = useQuery({
+    queryKey: ["correlation-candidates"],
+    queryFn: () => client.listCorrelationCandidates(),
+  });
+  const review = async (id: string, decision: "accept" | "reject") => {
+    await client.reviewCorrelationCandidate(id, decision);
+    await cache.invalidateQueries({ queryKey: ["correlation-candidates"] });
+    await cache.invalidateQueries({ queryKey: ["global-sessions"] });
+  };
+  const pending = useMemo(
+    () =>
+      candidates.data?.filter((candidate) => candidate.status === "pending") ??
+      [],
+    [candidates.data],
+  );
+  const sessionsById = useMemo(
+    () => new Map(sessions.map((session) => [session.id, session])),
+    [sessions],
+  );
+  const filtered = useMemo(() => {
+    const query = filter.trim().toLocaleLowerCase();
+    if (!query) return pending;
+    return pending.filter((candidate) => {
+      const related = [
+        sessionsById.get(candidate.left_native_session_id),
+        sessionsById.get(candidate.right_native_session_id),
+      ];
+      return [
+        candidate.left_native_session_id,
+        candidate.right_native_session_id,
+        ...related.flatMap((session) =>
+          session ? [session.thread_title, session.tool_family] : [],
+        ),
+      ].some((value) => value.toLocaleLowerCase().includes(query));
+    });
+  }, [filter, pending, sessionsById]);
+  const visible = filtered.slice(0, visibleCount);
+
+  return (
+    <details className="correlation-review" open>
+      <summary>
+        <h2 id="correlation-review-heading">Correlation review</h2>
+        <span>{pending.length} pending</span>
+      </summary>
+      <p className="correlation-intro">
+        Each score compares the two sessions below. Review the contributing
+        signals before linking them into one global context.
+      </p>
+      {candidates.isPending && <p role="status">Loading candidates…</p>}
+      {pending.length === 0 && !candidates.isPending && (
+        <p>No uncertain candidates</p>
+      )}
+      {pending.length > 0 && (
+        <label className="correlation-filter">
+          Filter correlation candidates
+          <input
+            type="search"
+            value={filter}
+            onChange={(event) => {
+              setFilter(event.target.value);
+              setVisibleCount(CORRELATION_PAGE_SIZE);
+            }}
+            placeholder="Thread title, tool, or native ID"
+          />
+        </label>
+      )}
+      {filter && filtered.length === 0 && <p>No matching candidates</p>}
+      {visible.map((candidate) => (
+        <article key={candidate.id}>
+          <div className="correlation-score">
+            <strong>{Math.round(candidate.score * 100)}% match</strong>
+            <span>Combined confidence</span>
+          </div>
+          <div className="correlation-pair">
+            <CorrelationSession
+              session={sessionsById.get(candidate.left_native_session_id)}
+              nativeId={candidate.left_native_session_id}
+            />
+            <span aria-hidden="true">↔</span>
+            <CorrelationSession
+              session={sessionsById.get(candidate.right_native_session_id)}
+              nativeId={candidate.right_native_session_id}
+            />
+          </div>
+          <details className="correlation-evidence">
+            <summary>Why this score?</summary>
+            <ul>
+              {candidate.evidence.flatMap((evidence, index) =>
+                formatEvidence(evidence).map((line, lineIndex) => (
+                  <li key={`${candidate.id}-${index}-${lineIndex}`}>{line}</li>
+                )),
+              )}
+            </ul>
+          </details>
+          <div className="review-actions">
+            <button
+              type="button"
+              onClick={() => void review(candidate.id, "accept")}
+            >
+              Link candidate
+            </button>
+            <button
+              type="button"
+              onClick={() => void review(candidate.id, "reject")}
+            >
+              Reject candidate
+            </button>
+          </div>
+        </article>
+      ))}
+      {visibleCount < filtered.length && (
+        <button
+          type="button"
+          className="show-more-correlations"
+          onClick={() =>
+            setVisibleCount((count) => count + CORRELATION_PAGE_SIZE)
+          }
+        >
+          Show more matches
+        </button>
+      )}
+      {visible.length > 0 && (
+        <small>
+          Showing {visible.length} of {filtered.length} matching candidates
+        </small>
+      )}
+    </details>
+  );
+}
+
+function CorrelationSession({
+  session,
+  nativeId,
+}: {
+  session: NativeSession | undefined;
+  nativeId: string;
+}) {
+  if (!session) {
+    return (
+      <div className="correlation-session">
+        <strong>{nativeId}</strong>
+        <small>Session metadata unavailable</small>
+      </div>
+    );
+  }
+  const timestamp = session.ended_at ?? session.started_at;
+  return (
+    <div className="correlation-session">
+      <span className="tool-badge">
+        {session.tool_family} · {session.surface.toLocaleUpperCase()}
+      </span>
+      <strong>{session.thread_title}</strong>
+      <span>
+        {timestamp
+          ? new Intl.DateTimeFormat(undefined, {
+              dateStyle: "medium",
+              timeStyle: "short",
+            }).format(new Date(timestamp))
+          : "Unknown date"}
+      </span>
+      <span>
+        {formatBytes(session.content_bytes)} · {session.event_count} events
+      </span>
+      <small title={nativeId}>{nativeId}</small>
+    </div>
+  );
+}
+
+function formatEvidence(evidence: Record<string, unknown>): string[] {
+  const signal = String(evidence.signal ?? "signal");
+  if (signal === "workspace")
+    return [`Workspace match: ${String(evidence.matched)}`];
+  if (signal === "temporal_gap")
+    return [`Time gap: ${String(evidence.seconds)} seconds`];
+  if (signal === "content_jaccard") {
+    const sharedTerms = Array.isArray(evidence.shared_terms)
+      ? evidence.shared_terms.map(String)
+      : [];
+    const legacySharedTermCount =
+      typeof evidence.shared_terms === "number"
+        ? Number(evidence.shared_terms)
+        : 0;
+    return [
+      `Content similarity: ${Math.round(Number(evidence.similarity ?? 0) * 100)}%`,
+      ...(sharedTerms.length > 0
+        ? [`Shared keywords: ${sharedTerms.join(", ")}`]
+        : legacySharedTermCount > 0
+          ? [
+              `Shared keywords: ${legacySharedTermCount} terms (recalculation pending)`,
+            ]
+          : []),
+    ];
+  }
+  return [JSON.stringify(evidence)];
 }
 
 function GlobalSessionReview({
@@ -347,9 +843,11 @@ function ErrorState({
 function EventCard({
   event,
   client,
+  revealContent,
 }: {
   event: EventSummary;
   client: SessionMeshClient;
+  revealContent: boolean;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [detail, setDetail] = useState<CanonicalEvent>();
@@ -357,6 +855,16 @@ function EventCard({
     setDetail(await client.getEvent(event.event_id));
     setConfirming(false);
   };
+  useEffect(() => {
+    if (!revealContent || detail) return;
+    let active = true;
+    void client.getEvent(event.event_id).then((loaded) => {
+      if (active) setDetail(loaded);
+    });
+    return () => {
+      active = false;
+    };
+  }, [client, detail, event.event_id, revealContent]);
   return (
     <article className={`event event-${event.kind || "unknown"}`}>
       <div className="event-title">
@@ -395,9 +903,49 @@ function EventCard({
           </button>
         </div>
       )}
-      {detail && <pre tabIndex={0}>{JSON.stringify(detail, null, 2)}</pre>}
+      {detail && <EventContent detail={detail} />}
     </article>
   );
+}
+
+function EventContent({ detail }: { detail: CanonicalEvent }) {
+  const preferredFields = [
+    "text",
+    "command",
+    "stdout",
+    "output",
+    "content",
+    "message",
+  ];
+  const values = preferredFields
+    .map((field) => [field, detail.payload[field]] as const)
+    .filter((entry) => entry[1] !== undefined && entry[1] !== null);
+  const sourcePath = String(detail.provenance.source_path ?? "Unknown source");
+  return (
+    <section className="event-content" aria-label="Event content">
+      {values.length > 0 ? (
+        values.map(([field, value]) => (
+          <div key={field}>
+            <strong>{eventLabel(field)}</strong>
+            <pre tabIndex={0}>{formatContent(value)}</pre>
+          </div>
+        ))
+      ) : (
+        <pre tabIndex={0}>{JSON.stringify(detail.payload, null, 2)}</pre>
+      )}
+      <details>
+        <summary>Full canonical event</summary>
+        <pre tabIndex={0}>{JSON.stringify(detail, null, 2)}</pre>
+      </details>
+      <p className="event-source">
+        Source: <span>{sourcePath}</span>
+      </p>
+    </section>
+  );
+}
+
+function formatContent(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
 function groupEvents(events: EventSummary[]): EventSummary[][] {

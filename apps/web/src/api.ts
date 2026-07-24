@@ -9,6 +9,9 @@ export interface NativeSession {
   surface: string;
   started_at: string | null;
   ended_at: string | null;
+  thread_title: string;
+  event_count: number;
+  content_bytes: number;
 }
 
 export interface EventSummary {
@@ -25,6 +28,26 @@ export interface CanonicalEvent extends EventSummary {
   schema_version: string;
   payload: Record<string, unknown>;
   provenance: Record<string, unknown>;
+}
+
+export interface SearchResult {
+  event_id: string;
+  native_session_id: string;
+  tool_family: string;
+  kind: string;
+  timestamp: string;
+  content: string;
+  source_path: string;
+}
+
+export interface CorrelationCandidate {
+  id: string;
+  left_native_session_id: string;
+  right_native_session_id: string;
+  target_global_session_id: string | null;
+  score: number;
+  status: "pending" | "accepted" | "rejected";
+  evidence: Array<Record<string, unknown>>;
 }
 
 export interface GlobalSession {
@@ -56,6 +79,12 @@ export interface SessionMeshClient {
   listSessions(): Promise<Page<NativeSession>>;
   listEvents(sessionId: string, kind?: string): Promise<Page<EventSummary>>;
   getEvent(eventId: string): Promise<CanonicalEvent>;
+  searchEvents(query: string): Promise<SearchResult[]>;
+  listCorrelationCandidates(): Promise<CorrelationCandidate[]>;
+  reviewCorrelationCandidate(
+    id: string,
+    decision: "accept" | "reject",
+  ): Promise<void>;
   listGlobalSessions(): Promise<GlobalSession[]>;
   getGlobalSession(id: string): Promise<GlobalSessionDetail>;
   createGlobalSession(objective: string): Promise<GlobalSession>;
@@ -106,6 +135,16 @@ export function createApiClient(token: string): SessionMeshClient {
     },
     getEvent: (eventId) =>
       request(`/api/v1/events/${encodeURIComponent(eventId)}`),
+    searchEvents: (query) =>
+      request(
+        `/api/v1/events/search?${new URLSearchParams({ query, limit: "100" }).toString()}`,
+      ),
+    listCorrelationCandidates: () => request("/api/v1/correlation-candidates"),
+    reviewCorrelationCandidate: (id, decision) =>
+      request(
+        `/api/v1/correlation-candidates/${encodeURIComponent(id)}/${decision}`,
+        { method: "POST" },
+      ),
     listGlobalSessions: () => request("/api/v1/global-sessions"),
     getGlobalSession: (id) =>
       request(`/api/v1/global-sessions/${encodeURIComponent(id)}`),

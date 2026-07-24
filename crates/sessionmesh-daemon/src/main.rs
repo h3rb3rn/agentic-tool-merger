@@ -15,9 +15,12 @@ use sessionmesh_ingest::codex::{
     CodexDiscoveryInput, CodexHome, CodexSourceKind, IncrementalInput, discover, ingest_file,
 };
 use sessionmesh_ingest::external::{
-    ExternalSource, discover_claude, discover_continue, ingest_external,
+    ExternalSource, discover_agy, discover_claude, discover_continue, ingest_external,
 };
-use sessionmesh_storage::{MembershipDecision, Storage, StoredGlobalSession};
+use sessionmesh_ingest::opencode::{OpenCodeSource, discover_opencode, ingest_opencode};
+use sessionmesh_storage::{
+    MembershipDecision, Storage, StoredCorrelationCandidate, StoredGlobalSession,
+};
 use sha2::{Digest, Sha256};
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -75,12 +78,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let original_profile_root = environment
         .get("SESSIONMESH_PROFILE_ORIGINAL_ROOT")
         .map_or_else(|| user_home.clone(), PathBuf::from);
-    let external_sources = external_sources(&profile_root, &original_profile_root);
     tokio::spawn(run_ingestion(
         ingestion_state,
         discovery_input,
-        external_sources,
+        profile_root,
+        original_profile_root,
         config.watch_debounce_ms.value,
+        config.correlation_threshold.value,
     ));
     let address = SocketAddr::new(config.bind_address.value, config.port.value);
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -95,16 +99,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn run_ingestion(
     state: ApiState,
     discovery_input: CodexDiscoveryInput,
-    external_sources: Vec<ExternalSource>,
+    profile_root: PathBuf,
+    original_profile_root: PathBuf,
     interval_ms: u64,
+    correlation_threshold: f64,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
     loop {
         interval.tick().await;
         let mut changed = scan_codex_once(&state, &discovery_input).await;
+        let external_sources = external_sources(&profile_root, &original_profile_root);
+        let opencode_source = discover_opencode(&profile_root, &original_profile_root);
         changed |= scan_external_once(&state, &external_sources).await;
+        changed |= scan_opencode_once(&state, opencode_source.as_ref()).await;
         if changed {
-            let _ = reconcile_and_refresh(&state).await;
+            let _ = reconcile_and_refresh(&state, correlation_threshold).await;
         }
     }
 }
@@ -154,7 +163,26 @@ fn external_sources(profile_root: &Path, original_root: &Path) -> Vec<ExternalSo
         &profile_root.join(".continue"),
         &original_root.join(".continue"),
     ));
+    sources.extend(discover_agy(
+        &profile_root.join(".gemini/antigravity-cli"),
+        &original_root.join(".gemini/antigravity-cli"),
+    ));
     sources
+}
+
+async fn scan_opencode_once(state: &ApiState, source: Option<&OpenCodeSource>) -> bool {
+    let Some(source) = source else {
+        return false;
+    };
+    let imported_at =
+        chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339();
+    let Ok(import) = ingest_opencode(state.storage(), source, &imported_at).await else {
+        return false;
+    };
+    for event in &import.events {
+        state.publish(event);
+    }
+    import.changed
 }
 
 async fn scan_external_once(state: &ApiState, sources: &[ExternalSource]) -> bool {
@@ -175,17 +203,27 @@ async fn scan_external_once(state: &ApiState, sources: &[ExternalSource]) -> boo
 #[derive(Clone, Debug)]
 struct SessionSummary {
     id: String,
+    tool_family: String,
     cwd: Option<String>,
     objective: String,
+    content_terms: BTreeSet<String>,
     started_at: chrono::DateTime<chrono::FixedOffset>,
     ended_at: chrono::DateTime<chrono::FixedOffset>,
 }
 
-async fn reconcile_and_refresh(state: &ApiState) -> Result<(), Box<dyn Error + Send + Sync>> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "reconciliation keeps candidate persistence, membership decisions, and handoff refresh in one auditable orchestration boundary"
+)]
+async fn reconcile_and_refresh(
+    state: &ApiState,
+    correlation_threshold: f64,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let summaries = session_summaries(state.storage()).await?;
     let mut memberships = state.storage().list_all_session_members().await?;
     let globals = state.storage().list_global_sessions().await?;
     let mut touched = BTreeSet::new();
+    refresh_pending_candidate_evidence(state.storage(), &summaries).await?;
     for summary in &summaries {
         if memberships
             .iter()
@@ -199,26 +237,60 @@ async fn reconcile_and_refresh(state: &ApiState) -> Result<(), Box<dyn Error + S
                 let other = summaries
                     .iter()
                     .find(|candidate| candidate.id == member.native_session_id)?;
-                same_work_context(summary, other)
-                    .then_some((member.global_session_id.clone(), other))
+                (summary.tool_family != other.tool_family).then(|| {
+                    let evidence = correlation_evidence(summary, other);
+                    (member.global_session_id.clone(), other, evidence)
+                })
             })
-            .min_by_key(|(_, other)| temporal_gap(summary, other));
-        let (global_id, confidence, version) = if let Some((global_id, _)) = candidate {
-            (global_id, 0.85, "workspace-temporal-v1")
-        } else {
-            let global_id = global_id(&summary.id);
-            let now = summary.started_at.to_rfc3339();
+            .max_by(|left, right| {
+                left.2
+                    .score
+                    .partial_cmp(&right.2.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        let accepted = candidate
+            .as_ref()
+            .is_some_and(|(_, _, evidence)| evidence.score >= correlation_threshold);
+        if let Some((_, other, evidence)) = &candidate {
             state
                 .storage()
-                .create_global_session(&StoredGlobalSession {
-                    id: global_id.clone(),
-                    objective: summary.objective.clone(),
-                    created_at: now.clone(),
-                    updated_at: now,
+                .upsert_correlation_candidate(&StoredCorrelationCandidate {
+                    id: candidate_id(&summary.id, &other.id),
+                    left_native_session_id: summary.id.clone(),
+                    right_native_session_id: other.id.clone(),
+                    score: evidence.score,
+                    status: if accepted { "accepted" } else { "pending" }.to_owned(),
+                    evidence: evidence.details.clone(),
                 })
                 .await?;
-            (global_id, 1.0, "automatic-seed-v1")
-        };
+        }
+        let (global_id, confidence, version, reason) =
+            if let Some((global_id, _, evidence)) = candidate.filter(|_| accepted) {
+                (
+                    global_id,
+                    evidence.score,
+                    "explainable-content-v1",
+                    evidence.summary,
+                )
+            } else {
+                let global_id = global_id(&summary.id);
+                let now = summary.started_at.to_rfc3339();
+                state
+                    .storage()
+                    .create_global_session(&StoredGlobalSession {
+                        id: global_id.clone(),
+                        objective: summary.objective.clone(),
+                        created_at: now.clone(),
+                        updated_at: now,
+                    })
+                    .await?;
+                (
+                    global_id,
+                    1.0,
+                    "automatic-seed-v1",
+                    "no accepted cross-tool candidate; created isolated global session".to_owned(),
+                )
+            };
         let linked_at = summary.ended_at.to_rfc3339();
         state
             .storage()
@@ -227,7 +299,7 @@ async fn reconcile_and_refresh(state: &ApiState) -> Result<(), Box<dyn Error + S
                     global_session_id: &global_id,
                     native_session_id: &summary.id,
                     actor: "automatic-correlator",
-                    reason: Some("same workspace and bounded temporal proximity"),
+                    reason: Some(&reason),
                     created_at: &linked_at,
                 },
                 confidence,
@@ -257,6 +329,48 @@ async fn reconcile_and_refresh(state: &ApiState) -> Result<(), Box<dyn Error + S
     }
     for global_id in touched {
         let _ = state.refresh_global_handoff(&global_id).await;
+    }
+    Ok(())
+}
+
+/// Recomputes review-only evidence when its explainability schema evolves.
+///
+/// Pending candidates are derived state and may be safely recalculated from
+/// immutable canonical events. Accepted and rejected candidates represent
+/// durable user decisions, so this refresh deliberately leaves them unchanged.
+async fn refresh_pending_candidate_evidence(
+    storage: &Storage,
+    summaries: &[SessionSummary],
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    for candidate in storage
+        .list_correlation_candidates()
+        .await?
+        .into_iter()
+        .filter(|candidate| candidate.status == "pending")
+    {
+        let Some(left) = summaries
+            .iter()
+            .find(|summary| summary.id == candidate.left_native_session_id)
+        else {
+            continue;
+        };
+        let Some(right) = summaries
+            .iter()
+            .find(|summary| summary.id == candidate.right_native_session_id)
+        else {
+            continue;
+        };
+        let evidence = correlation_evidence(left, right);
+        storage
+            .upsert_correlation_candidate(&StoredCorrelationCandidate {
+                id: candidate.id,
+                left_native_session_id: candidate.left_native_session_id,
+                right_native_session_id: candidate.right_native_session_id,
+                score: evidence.score,
+                status: "pending".to_owned(),
+                evidence: evidence.details,
+            })
+            .await?;
     }
     Ok(())
 }
@@ -307,10 +421,24 @@ async fn session_summaries(
                 },
                 compact_objective,
             );
+        let content_terms = events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .payload
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .flat_map(content_terms)
+            .collect();
         summaries.push(SessionSummary {
             id,
+            tool_family: events
+                .first()
+                .map_or_else(|| "unknown".to_owned(), |event| event.tool.family.clone()),
             cwd,
             objective,
+            content_terms,
             started_at,
             ended_at,
         });
@@ -319,8 +447,81 @@ async fn session_summaries(
     Ok(summaries)
 }
 
-fn same_work_context(left: &SessionSummary, right: &SessionSummary) -> bool {
-    left.cwd.is_some() && left.cwd == right.cwd && temporal_gap(left, right) <= 7 * 24 * 60 * 60
+#[derive(Debug)]
+struct CorrelationEvidence {
+    score: f64,
+    summary: String,
+    details: Vec<String>,
+}
+
+fn correlation_evidence(left: &SessionSummary, right: &SessionSummary) -> CorrelationEvidence {
+    let same_workspace = left.cwd.is_some() && left.cwd == right.cwd;
+    let gap_seconds = temporal_gap(left, right);
+    let temporally_close = gap_seconds <= 7 * 24 * 60 * 60;
+    let shared_terms = left
+        .content_terms
+        .intersection(&right.content_terms)
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>();
+    let intersection = left
+        .content_terms
+        .intersection(&right.content_terms)
+        .count();
+    let union = left.content_terms.union(&right.content_terms).count();
+    let similarity = if union == 0 {
+        0.0
+    } else {
+        let intersection = u32::try_from(intersection).unwrap_or(u32::MAX);
+        let union = u32::try_from(union).unwrap_or(u32::MAX);
+        f64::from(intersection) / f64::from(union)
+    };
+    let workspace_score = if same_workspace { 0.65 } else { 0.0 };
+    let temporal_score = if temporally_close { 0.15 } else { 0.0 };
+    let content_score = if same_workspace {
+        similarity * 0.2
+    } else {
+        similarity * 0.85
+    };
+    let score = (workspace_score + temporal_score + content_score).min(1.0);
+    let details = vec![
+        serde_json::json!({"signal":"workspace","matched":same_workspace,"weight":workspace_score}).to_string(),
+        serde_json::json!({"signal":"temporal_gap","seconds":gap_seconds,"matched":temporally_close,"weight":temporal_score}).to_string(),
+        serde_json::json!({
+            "signal":"content_jaccard",
+            "similarity":similarity,
+            "shared_term_count":intersection,
+            "shared_terms":shared_terms,
+            "weight":content_score
+        }).to_string(),
+    ];
+    CorrelationEvidence {
+        score,
+        summary: format!(
+            "workspace_match={same_workspace}; temporal_gap_seconds={gap_seconds}; content_similarity={similarity:.3}"
+        ),
+        details,
+    }
+}
+
+fn content_terms(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|character: char| !character.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|term| term.len() >= 4)
+}
+
+fn candidate_id(left: &str, right: &str) -> String {
+    let (left, right) = if left <= right {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    let digest = Sha256::digest(format!("{left}\0{right}").as_bytes());
+    let mut id = String::from("candidate_");
+    for byte in &digest[..16] {
+        write!(&mut id, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    id
 }
 
 fn temporal_gap(left: &SessionSummary, right: &SessionSummary) -> i64 {
@@ -440,10 +641,62 @@ fn set_file_permissions(_path: &Path) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use chrono::{TimeZone, Utc};
     use sessionmesh_mcp::McpServer;
     use sessionmesh_storage::EventRepository;
 
     use super::*;
+
+    fn summary(tool_family: &str, cwd: &str, terms: &[&str]) -> SessionSummary {
+        SessionSummary {
+            id: format!("{tool_family}:session"),
+            tool_family: tool_family.to_owned(),
+            cwd: Some(cwd.to_owned()),
+            objective: "Test explainable correlation".to_owned(),
+            started_at: Utc.with_ymd_and_hms(2026, 7, 22, 10, 0, 0).unwrap().into(),
+            ended_at: Utc.with_ymd_and_hms(2026, 7, 22, 10, 5, 0).unwrap().into(),
+            content_terms: terms
+                .iter()
+                .map(|term| (*term).to_owned())
+                .collect::<BTreeSet<_>>(),
+        }
+    }
+
+    #[test]
+    fn content_correlation_is_explainable_across_tool_families() {
+        let left = summary("agy", "/work/project", &["parser", "session", "sqlite"]);
+        let same_work = summary("opencode", "/work/project", &["parser", "session"]);
+        let related_elsewhere = summary("codex", "/other", &["parser", "session", "sqlite"]);
+        let unrelated = summary("claude", "/elsewhere", &["frontend"]);
+
+        let same_work_evidence = correlation_evidence(&left, &same_work);
+        let related_evidence = correlation_evidence(&left, &related_elsewhere);
+        let unrelated_evidence = correlation_evidence(&left, &unrelated);
+
+        assert!(same_work_evidence.score >= 0.8);
+        assert!((related_evidence.score - 1.0).abs() < f64::EPSILON);
+        assert!(unrelated_evidence.score <= 0.15);
+        assert!(
+            same_work_evidence
+                .details
+                .iter()
+                .any(|detail| detail.contains("content_jaccard"))
+        );
+        let content_evidence = same_work_evidence
+            .details
+            .iter()
+            .find_map(|detail| {
+                let value = serde_json::from_str::<serde_json::Value>(detail).ok()?;
+                (value["signal"] == "content_jaccard").then_some(value)
+            })
+            .expect("content evidence should be present");
+        assert_eq!(
+            content_evidence["shared_terms"],
+            serde_json::json!(["parser", "session"])
+        );
+    }
 
     #[test]
     fn token_is_persistent_valid_and_user_only() {
@@ -521,7 +774,7 @@ mod tests {
                 .unwrap();
         assert_eq!(untraceable, 0);
 
-        reconcile_and_refresh(&state).await.unwrap();
+        reconcile_and_refresh(&state, 0.8).await.unwrap();
         let global = storage.list_global_sessions().await.unwrap().pop().unwrap();
         assert!(
             !storage

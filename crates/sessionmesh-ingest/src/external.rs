@@ -1,4 +1,4 @@
-//! Read-only snapshot adapters for Claude Code and Continue session stores.
+//! Read-only snapshot adapters for JSON/JSONL agent session stores.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -20,6 +20,8 @@ pub enum ExternalTool {
     ClaudeCode,
     /// Continue JSON session snapshots.
     Continue,
+    /// Antigravity CLI prompt history.
+    Agy,
 }
 
 impl ExternalTool {
@@ -27,12 +29,13 @@ impl ExternalTool {
         match self {
             Self::ClaudeCode => "claude-code",
             Self::Continue => "continue",
+            Self::Agy => "agy",
         }
     }
 
     fn surface(self) -> &'static str {
         match self {
-            Self::ClaudeCode => "cli",
+            Self::ClaudeCode | Self::Agy => "cli",
             Self::Continue => "ide",
         }
     }
@@ -87,6 +90,20 @@ pub fn discover_continue(home: &Path, original_home: &Path) -> Vec<ExternalSourc
         .collect()
 }
 
+/// Discovers the Antigravity CLI conversation-aware prompt history.
+#[must_use]
+pub fn discover_agy(home: &Path, original_home: &Path) -> Vec<ExternalSource> {
+    let path = home.join("history.jsonl");
+    path.is_file()
+        .then(|| ExternalSource {
+            tool: ExternalTool::Agy,
+            original_path: original_home.join("history.jsonl"),
+            path,
+        })
+        .into_iter()
+        .collect()
+}
+
 /// Imports a changed snapshot atomically while preserving immutable raw bytes.
 ///
 /// Unchanged metadata fingerprints avoid reparsing. Changed snapshots are
@@ -131,6 +148,7 @@ pub async fn ingest_external(
         ExternalTool::Continue => {
             parse_continue(&bytes, source, &stable_generation, &fallback_timestamp)?
         }
+        ExternalTool::Agy => parse_agy(&bytes, source, &stable_generation, &fallback_timestamp)?,
     };
     let events = parsed
         .iter()
@@ -309,6 +327,80 @@ fn parse_continue(
             )
         })
         .collect::<Result<Vec<_>, _>>()
+}
+
+fn parse_agy(
+    bytes: &[u8],
+    source: &ExternalSource,
+    generation: &str,
+    fallback_timestamp: &str,
+) -> Result<Vec<ParsedRecord>, ExternalError> {
+    let mut records = Vec::new();
+    let mut offset = 0_u64;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let start = offset;
+        offset = offset.saturating_add(u64::try_from(line.len()).unwrap_or(u64::MAX));
+        let trimmed = line.strip_suffix(b"\n").unwrap_or(line);
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let Some(conversation_id) = value
+            .get("conversationId")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let text = value
+            .get("display")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if text.is_empty() {
+            continue;
+        }
+        let timestamp = value
+            .get("timestamp")
+            .and_then(agy_timestamp)
+            .unwrap_or_else(|| fallback_timestamp.to_owned());
+        let workspace = value
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .filter(|workspace| !workspace.is_empty())
+            .map(|cwd| WorkspaceContext {
+                cwd: Some(cwd.to_owned()),
+                repository_id: None,
+                branch: None,
+                head: None,
+            });
+        let payload = BTreeMap::from([(
+            "text".to_owned(),
+            serde_json::Value::String(text.to_owned()),
+        )]);
+        records.push(ParsedRecord {
+            offset: start,
+            raw: line.to_vec(),
+            event: event(
+                source,
+                &format!("agy:{conversation_id}"),
+                u64::try_from(records.len()).unwrap_or(u64::MAX),
+                &timestamp,
+                EventKind::UserMessage,
+                workspace,
+                payload,
+                generation,
+                start,
+            )?,
+        });
+    }
+    Ok(records)
+}
+
+fn agy_timestamp(value: &serde_json::Value) -> Option<String> {
+    if let Some(timestamp) = value.as_str() {
+        return Some(timestamp.to_owned());
+    }
+    let milliseconds = value.as_i64()?;
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(milliseconds)
+        .map(|timestamp| timestamp.to_rfc3339())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -535,5 +627,52 @@ mod tests {
                 == Some("/repo")
         }));
         assert_eq!(storage.list_native_sessions().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn imports_agy_history_by_conversation_without_reading_oauth_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("antigravity-cli");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("history.jsonl"),
+            concat!(
+                "{\"conversationId\":\"agy-1\",\"display\":\"Design correlation\",\"timestamp\":1784678400000,\"workspace\":\"/workspace/repo\"}\n",
+                "{\"conversationId\":\"agy-1\",\"display\":\"Implement evidence\",\"timestamp\":1784678460000,\"workspace\":\"/workspace/repo\"}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(home.join("antigravity-oauth-token"), "must-not-be-read").unwrap();
+        let storage = Storage::open(
+            directory.path().join("state.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .unwrap();
+        let source = discover_agy(&home, Path::new("~/.gemini/antigravity-cli"))
+            .pop()
+            .unwrap();
+
+        let imported = ingest_external(&storage, &source, "2026-07-22T00:00:00Z")
+            .await
+            .unwrap();
+
+        assert_eq!(imported.events.len(), 2);
+        assert!(
+            imported
+                .events
+                .iter()
+                .all(|event| event.native_session_id == "agy:agy-1")
+        );
+        assert_eq!(imported.events[0].tool.family, "agy");
+        assert_eq!(
+            imported.events[0]
+                .workspace
+                .as_ref()
+                .unwrap()
+                .cwd
+                .as_deref(),
+            Some("/workspace/repo")
+        );
     }
 }

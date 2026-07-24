@@ -4,19 +4,29 @@ This page is the canonical restart and execution ledger.
 
 ## Current state
 
-- **Current milestone:** Milestone 3 integration foundation implemented
+- **Current milestone:** Milestone 3 multi-tool correlation implemented
 - **Active prompt:** None
-- **Next prompt:** Expand Claude and Continue native event coverage
+- **Next prompt:** Decode supported Agy assistant trajectory exports
 - **Last completed prompt:** 14 — MVP Hardening
 - **Known blockers:** None
 
-The running integration foundation now discovers Claude Code and Continue
-sessions from a read-only agent home, correlates sessions by normalized
-workspace and bounded temporal proximity, refreshes deterministic handoffs,
+The running integration foundation now discovers Claude Code, Continue,
+OpenCode, and Agy sessions from a read-only agent home, correlates sessions by
+normalized workspace, bounded temporal proximity, and lexical content evidence,
+persists uncertain candidates for review, refreshes deterministic handoffs,
 and delivers them to Codex, Claude Code, and Continue through MCP and startup
 connectors. Native transcript synchronization remains intentionally excluded:
 shared knowledge is delivered as provenance-backed context without mutating
 tool-owned stores.
+
+The Correlation Review presents a bounded, searchable queue. Candidate scores
+are attached to paired thread context cards and can be expanded into workspace,
+time, similarity, and shared-keyword evidence instead of being shown beside
+opaque native IDs alone.
+
+The user documentation now includes a beginner-oriented path from service and
+connector setup through connection verification, Web UI authentication, native
+resume, and cross-tool continuation after a rate limit.
 
 ## Prompt ledger
 
@@ -351,8 +361,9 @@ Known limitations:
   notifications.
 - Large-store API sorting still loads canonical event projections before
   pagination.
-- Only Codex has a production vertical slice; other tool families remain
-  schema and adapter roadmap targets.
+- OpenCode imports text parts from its allowlisted SQLite session tables. Agy
+  currently imports stable prompt history; protobuf assistant trajectories
+  await a supported schema or export surface.
 - Podman was not installed on the validation host. The image and Compose model
   remain OCI-compatible, while Docker is the exercised runtime.
 
@@ -360,6 +371,6 @@ Release readiness: the local-first MVP satisfies Prompts 00–14. The first
 public commit may be staged after the final sensitive-data audit. Nothing may
 be pushed automatically.
 
-Next roadmap decision: begin Milestone 3 with Claude Code, Continue, and
-OpenCode adapters, or first optimize the Codex watcher and large-store query
-path using representative sanitized fixtures.
+Next roadmap decision: add supported Agy trajectory decoding or optimize the
+Codex watcher and large-store query path using representative sanitized
+fixtures.

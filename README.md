@@ -69,6 +69,26 @@ flowchart LR
 See the [deployment model](docs/architecture/deployment.md) for the mount and
 security contract.
 
+## Getting started
+
+For a beginner-friendly walkthrough covering one-time connector installation,
+Web UI authentication, connection checks, native session resume, and
+cross-tool continuation after a rate limit, read:
+
+**[First steps for users](docs/getting-started/first-steps.md)**
+
+The short version for the deployed service is:
+
+```bash
+cd /opt/deployment/agenttool-merger
+docker compose ps
+scripts/install-sessionmesh-connectors
+```
+
+Restart Codex, Claude Code, and Continue after installing their connectors.
+Always start the next agent from the project directory whose work should be
+continued.
+
 ## Configuration
 
 Copy the safe template for local development:
@@ -90,6 +110,7 @@ Important variables:
 | `SESSIONMESH_HOME`                  | `/var/lib/sessionmesh`             | Persistent service state           |
 | `SESSIONMESH_BIND_ADDRESS`          | `127.0.0.1`                        | Local API bind address             |
 | `SESSIONMESH_PORT`                  | `8787`                             | Local API port                     |
+| `SESSIONMESH_PUBLISH_ADDRESS`       | `127.0.0.1`                        | OCI host publish address           |
 | `SESSIONMESH_ALLOW_NETWORK`         | `false`                            | Explicit remote-network opt-in     |
 | `SESSIONMESH_WEB_ROOT`              | `/usr/share/sessionmesh/web`       | Built web application directory    |
 | `SESSIONMESH_DATABASE_PATH`         | `$SESSIONMESH_HOME/sessionmesh.db` | SQLite database                    |
@@ -118,10 +139,12 @@ must never be copied into `.env`, `.env.example`, documentation, or Git.
 
 ## Project state
 
-The MVP implementation includes active Codex, Claude Code, and Continue
-ingestion, immutable raw and canonical storage, authenticated REST/SSE, the
-responsive timeline, automatic audited global-session correlation,
-deterministic handoff refresh, and stdio MCP/startup delivery. The
+The MVP implementation includes active Codex, Claude Code, Continue, OpenCode,
+and Agy ingestion, immutable raw and canonical storage, authenticated REST/SSE,
+the responsive timeline, explainable audited global-session correlation,
+thread-title navigation with topic/date/size organization, cross-tool keyword
+search, human-readable event content, deterministic handoff
+refresh, and stdio MCP/startup delivery. The
 [implementation ledger](docs/development/implementation-status.md) records the
 verified scope and remaining limitations.
 
