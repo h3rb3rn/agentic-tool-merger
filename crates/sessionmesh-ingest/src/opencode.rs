@@ -45,33 +45,66 @@ pub fn discover_opencode(home: &Path, original_home: &Path) -> Option<OpenCodeSo
     })
 }
 
+/// Stable source identity used to key the ingestion cursor, before any
+/// server-side collector scoping.
+#[must_use]
+pub fn opencode_source_id(source: &OpenCodeSource) -> String {
+    format!("opencode:{}", source.path.to_string_lossy())
+}
+
 /// Imports `OpenCode` messages without selecting account, credential, or share tables.
 ///
 /// # Errors
 ///
 /// Returns [`OpenCodeError`] when the read-only database cannot be queried or
 /// the selected session rows cannot be normalized and stored atomically.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the scan keeps source selection, normalization, and cursor commit in one auditable transaction boundary"
-)]
 pub async fn ingest_opencode(
     storage: &Storage,
     source: &OpenCodeSource,
     imported_at: &str,
 ) -> Result<OpenCodeImport, OpenCodeError> {
-    let metadata = tokio::fs::metadata(&source.path).await?;
-    let fingerprint = database_fingerprint(&source.path, &metadata);
-    let source_id = format!("opencode:{}", source.path.to_string_lossy());
-    if storage
-        .get_cursor(&source_id)
-        .await?
-        .is_some_and(|cursor| cursor.source_generation == fingerprint)
-    {
+    let source_id = opencode_source_id(source);
+    let prior = storage.get_cursor(&source_id).await?;
+    let Some(batch) = prepare_opencode(source, imported_at, prior.as_ref()).await? else {
         return Ok(OpenCodeImport {
             changed: false,
             events: Vec::new(),
         });
+    };
+    let events = batch.events.clone();
+    storage.commit_batch(&batch, None).await?;
+    Ok(OpenCodeImport {
+        changed: true,
+        events,
+    })
+}
+
+/// Prepares a changed `OpenCode` database snapshot for atomic commit, or
+/// `None` when `prior_cursor`'s fingerprint already matches the current
+/// database (and its WAL file) and nothing changed.
+///
+/// Performs no storage access, so it is reusable by both local ingestion
+/// (which commits the result directly) and a network collector (which POSTs
+/// it to the daemon's ingestion API instead).
+///
+/// # Errors
+///
+/// Returns [`OpenCodeError`] when the read-only database cannot be queried
+/// or the selected session rows cannot be normalized.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the scan keeps source selection and normalization in one auditable boundary"
+)]
+pub async fn prepare_opencode(
+    source: &OpenCodeSource,
+    imported_at: &str,
+    prior_cursor: Option<&IngestionCursor>,
+) -> Result<Option<IngestionBatch>, OpenCodeError> {
+    let metadata = tokio::fs::metadata(&source.path).await?;
+    let fingerprint = database_fingerprint(&source.path, &metadata);
+    let source_id = opencode_source_id(source);
+    if prior_cursor.is_some_and(|cursor| cursor.source_generation == fingerprint) {
+        return Ok(None);
     }
 
     let options = SqliteConnectOptions::new()
@@ -193,24 +226,19 @@ pub async fn ingest_opencode(
         events.push(event);
         *sequence = sequence.saturating_add(1);
     }
-    storage
-        .commit_batch(&IngestionBatch {
-            raw_objects,
-            events: events.clone(),
-            cursor: IngestionCursor {
-                source_id,
-                source_generation: fingerprint,
-                byte_offset: metadata.len(),
-                next_sequence: u64::try_from(events.len()).unwrap_or(u64::MAX),
-                partial_line: Vec::new(),
-                updated_at: imported_at.to_owned(),
-            },
-        })
-        .await?;
-    Ok(OpenCodeImport {
-        changed: true,
+    let next_sequence = u64::try_from(events.len()).unwrap_or(u64::MAX);
+    Ok(Some(IngestionBatch {
+        raw_objects,
         events,
-    })
+        cursor: IngestionCursor {
+            source_id,
+            source_generation: fingerprint,
+            byte_offset: metadata.len(),
+            next_sequence,
+            partial_line: Vec::new(),
+            updated_at: imported_at.to_owned(),
+        },
+    }))
 }
 
 fn timestamp(value: i64, fallback: &str) -> String {

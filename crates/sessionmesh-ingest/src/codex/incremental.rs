@@ -153,7 +153,7 @@ pub async fn ingest_file(
 ) -> Result<PreparedIncremental, IngestError> {
     let prior = storage.get_cursor(&input.source_id).await?;
     let prepared = prepare_incremental(input, prior.as_ref()).await?;
-    storage.commit_batch(&prepared.batch).await?;
+    storage.commit_batch(&prepared.batch, None).await?;
     Ok(prepared)
 }
 

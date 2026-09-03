@@ -4,11 +4,13 @@ members = [
   "crates/sessionmesh-adapter-sdk",
   "crates/sessionmesh-api",
   "crates/sessionmesh-cli",
+  "crates/sessionmesh-collector",
   "crates/sessionmesh-core",
   "crates/sessionmesh-correlator",
   "crates/sessionmesh-daemon",
   "crates/sessionmesh-handoff",
   "crates/sessionmesh-ingest",
+  "crates/sessionmesh-ingest-wire",
   "crates/sessionmesh-mcp",
   "crates/sessionmesh-storage",
 ]

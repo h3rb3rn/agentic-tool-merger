@@ -15,9 +15,16 @@ const allowedWorkspaceDependencies = {
   "sessionmesh-api": [
     "sessionmesh-core",
     "sessionmesh-handoff",
+    "sessionmesh-ingest-wire",
     "sessionmesh-storage",
   ],
-  "sessionmesh-cli": ["sessionmesh-core"],
+  "sessionmesh-cli": ["sessionmesh-core", "sessionmesh-storage"],
+  "sessionmesh-collector": [
+    "sessionmesh-core",
+    "sessionmesh-ingest",
+    "sessionmesh-ingest-wire",
+    "sessionmesh-storage",
+  ],
   "sessionmesh-core": [],
   "sessionmesh-correlator": ["sessionmesh-core"],
   "sessionmesh-daemon": [
@@ -33,6 +40,7 @@ const allowedWorkspaceDependencies = {
     "sessionmesh-core",
     "sessionmesh-storage",
   ],
+  "sessionmesh-ingest-wire": ["sessionmesh-core", "sessionmesh-storage"],
   "sessionmesh-mcp": [
     "sessionmesh-core",
     "sessionmesh-correlator",

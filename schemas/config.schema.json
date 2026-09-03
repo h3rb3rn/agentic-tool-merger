@@ -23,6 +23,11 @@
       "minimum": 0,
       "maximum": 60000
     },
+    "reconcile_interval_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 600000
+    },
     "redaction_enabled": { "type": "boolean" },
     "embedding_endpoint": {
       "type": "string",
@@ -52,7 +57,22 @@
           "original_path": { "$ref": "#/$defs/path" }
         }
       }
-    }
+    },
+    "network_ingestion_enabled": { "type": "boolean" },
+    "ingest_bind_address": {
+      "type": "string",
+      "anyOf": [{ "format": "ipv4" }, { "format": "ipv6" }]
+    },
+    "ingest_port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "ingest_tls_cert_path": { "$ref": "#/$defs/path" },
+    "ingest_tls_key_path": { "$ref": "#/$defs/path" },
+    "ingest_max_batch_bytes": { "type": "integer", "minimum": 1 },
+    "ingest_max_events_per_batch": { "type": "integer", "minimum": 1 },
+    "ingest_rate_limit_per_minute": { "type": "integer", "minimum": 0 }
   },
   "$defs": {
     "path": {

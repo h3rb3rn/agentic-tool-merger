@@ -7,8 +7,10 @@ license.workspace = true
 
 [dependencies]
 axum.workspace = true
+axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 chrono.workspace = true
 getrandom.workspace = true
+rustls = { version = "0.23.43", default-features = false, features = ["ring"] }
 sessionmesh-api = { path = "../sessionmesh-api" }
 sessionmesh-core = { path = "../sessionmesh-core" }
 sessionmesh-ingest = { path = "../sessionmesh-ingest" }

@@ -1,9 +1,12 @@
 //! Versioned, authenticated local REST and streaming API.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::fmt::Write as FmtWrite;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -16,11 +19,18 @@ use sessionmesh_handoff::{
     HANDOFF_SCHEMA_VERSION, Handoff, HandoffError, HandoffInput, LocalExtractor, RecordedFact,
     RepositoryState, generate, snapshot_id,
 };
-use sessionmesh_storage::{
-    MembershipAuditEntry, MembershipDecision, Storage, StorageError, StoredGlobalSession,
-    StoredHandoff, StoredNativeSession, StoredSessionMember,
+use sessionmesh_ingest_wire::{
+    IngestBatchRequest, IngestBatchResponse, IngestCursorResponse, IngestCursorWire,
 };
+use sessionmesh_storage::{
+    CursorRepository, IngestionAuditEntry, IngestionAuditOutcome, IngestionBatch,
+    IngestionCollector, IngestionTokenRepository, MembershipAuditEntry, MembershipDecision,
+    Storage, StorageError, StoredGlobalSession, StoredHandoff, StoredNativeSession,
+    StoredSessionMember,
+};
+use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
+use tower_http::limit::RequestBodyLimitLayer;
 
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 200;
@@ -104,14 +114,11 @@ impl ApiState {
             .await?
             .into_iter()
             .map(|member| member.native_session_id)
-            .collect::<std::collections::BTreeSet<_>>();
+            .collect::<Vec<_>>();
         let events = self
             .storage
-            .list_canonical_events()
-            .await?
-            .into_iter()
-            .filter(|event| member_ids.contains(&event.native_session_id))
-            .collect::<Vec<_>>();
+            .list_canonical_events_for_sessions(&member_ids)
+            .await?;
         let records = self
             .storage
             .list_session_records(global_id)
@@ -1327,12 +1334,398 @@ impl IntoResponse for ApiError {
 
 pub use sessionmesh_core::bootstrap_stage;
 
+// --- Network ingestion (remote collectors) -------------------------------
+//
+// This is a separate trust boundary from the rest of this file: every other
+// route in `router()` is reached only over loopback (or an operator's
+// explicit `allow_network` opt-in) and authenticated with the single local
+// UI/API token. The routes below accept *inbound* data from previously
+// unrelated processes and are always served on their own listener, address,
+// and TLS termination, authenticated per-collector with widerrufbare
+// tokens, never the shared local token. See `IngestState::new`.
+
+/// Configured limits enforced on every network ingestion batch.
+#[derive(Clone, Copy, Debug)]
+pub struct IngestLimits {
+    /// Maximum accepted wire size of one batch request, in bytes.
+    pub max_batch_bytes: u64,
+    /// Maximum accepted canonical events in one batch request.
+    pub max_events_per_batch: usize,
+    /// Maximum accepted requests per minute, per collector. `0` disables
+    /// rate limiting.
+    pub rate_limit_per_minute: u32,
+}
+
+#[derive(Debug)]
+struct TokenBucket {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+/// Shared state for the network ingestion routes, independent from
+/// [`ApiState`] because it authenticates a disjoint set of principals
+/// (collectors, not local UI/MCP clients).
+#[derive(Clone)]
+pub struct IngestState {
+    storage: Storage,
+    limits: IngestLimits,
+    rate_limiter: Arc<Mutex<HashMap<String, TokenBucket>>>,
+}
+
+impl IngestState {
+    /// Creates ingestion state bound to the given storage and limits.
+    #[must_use]
+    pub fn new(storage: Storage, limits: IngestLimits) -> Self {
+        Self {
+            storage,
+            limits,
+            rate_limiter: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+/// Builds the network ingestion router.
+///
+/// Callers must serve this on its own TLS-terminated listener, separate from
+/// [`router`], and must gate mounting it behind an explicit operator opt-in.
+/// A `RequestBodyLimitLayer` bounds request buffering slightly above the
+/// configured, audited limit so oversized payloads still produce an audited
+/// rejection from the handler rather than a bare transport error whenever
+/// possible.
+pub fn ingest_router(state: IngestState) -> Router {
+    let body_limit = usize::try_from(state.limits.max_batch_bytes.saturating_add(64 * 1024))
+        .unwrap_or(usize::MAX);
+    Router::new()
+        .route("/api/v1/ingest/batch", post(ingest_batch))
+        .route("/api/v1/ingest/cursor", get(ingest_cursor))
+        .layer(RequestBodyLimitLayer::new(body_limit))
+        .with_state(state)
+}
+
+#[derive(Debug)]
+enum IngestApiError {
+    Unauthorized,
+    RateLimited,
+    PayloadTooLarge,
+    TooManyEvents,
+    MalformedRequest(String),
+    InvalidEvent(String),
+    RawObjectIdentityMismatch,
+    Storage(StorageError),
+}
+
+/// Response envelope for ingestion errors. Distinct from [`ErrorEnvelope`]
+/// because ingestion errors carry dynamic (owned) detail — e.g. a JSON parse
+/// error position — that is safe to return to the client for its own
+/// malformed input, unlike the fixed, static messages used elsewhere.
+#[derive(Serialize)]
+struct IngestErrorEnvelope {
+    code: &'static str,
+    message: String,
+}
+
+impl IngestApiError {
+    /// Detailed explanation persisted to the audit log. May include
+    /// internal detail (e.g. a storage error) that must never reach the
+    /// client directly; see [`Self::public_message`] for that.
+    fn audit_reason(&self) -> String {
+        match self {
+            Self::Unauthorized => "invalid or revoked collector token".to_owned(),
+            Self::RateLimited => "collector exceeded its request rate limit".to_owned(),
+            Self::PayloadTooLarge => "batch exceeds the configured maximum size".to_owned(),
+            Self::TooManyEvents => "batch exceeds the configured maximum event count".to_owned(),
+            Self::MalformedRequest(detail) | Self::InvalidEvent(detail) => detail.clone(),
+            Self::RawObjectIdentityMismatch => {
+                "a raw object's declared id does not match its content".to_owned()
+            }
+            Self::Storage(error) => format!("storage error: {error}"),
+        }
+    }
+
+    /// Safe message returned to the client. Client-input errors reuse the
+    /// detailed reason (it describes the client's own malformed request);
+    /// server-side failures are generic so internal detail never crosses
+    /// the network boundary.
+    fn public_message(&self) -> String {
+        match self {
+            Self::Storage(_) => "the request could not be completed".to_owned(),
+            _ => self.audit_reason(),
+        }
+    }
+}
+
+impl IntoResponse for IngestApiError {
+    fn into_response(self) -> Response {
+        let (status, code) = match &self {
+            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            Self::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+            Self::TooManyEvents => (StatusCode::PAYLOAD_TOO_LARGE, "too_many_events"),
+            Self::MalformedRequest(_) => (StatusCode::BAD_REQUEST, "malformed_request"),
+            Self::InvalidEvent(_) => (StatusCode::BAD_REQUEST, "invalid_event"),
+            Self::RawObjectIdentityMismatch => {
+                (StatusCode::BAD_REQUEST, "raw_object_identity_mismatch")
+            }
+            Self::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+        };
+        let message = self.public_message();
+        (status, Json(IngestErrorEnvelope { code, message })).into_response()
+    }
+}
+
+impl From<StorageError> for IngestApiError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+async fn authenticate_collector(
+    state: &IngestState,
+    headers: &HeaderMap,
+) -> Result<IngestionCollector, IngestApiError> {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or(IngestApiError::Unauthorized)?;
+    state
+        .storage
+        .authenticate_collector(token)
+        .await?
+        .ok_or(IngestApiError::Unauthorized)
+}
+
+/// Consumes one token from the collector's shared per-minute budget.
+///
+/// `0` disables limiting. Buckets are created lazily and refill
+/// continuously, so a collector that has been silent for a while starts
+/// with a full budget rather than an artificially delayed one.
+fn check_rate_limit(state: &IngestState, collector_id: &str) -> bool {
+    let capacity = f64::from(state.limits.rate_limit_per_minute);
+    if capacity <= 0.0 {
+        return true;
+    }
+    let refill_per_second = capacity / 60.0;
+    let now = Instant::now();
+    let mut buckets = state
+        .rate_limiter
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let bucket = buckets
+        .entry(collector_id.to_owned())
+        .or_insert(TokenBucket {
+            tokens: capacity,
+            last_refill: now,
+        });
+    let elapsed = now
+        .saturating_duration_since(bucket.last_refill)
+        .as_secs_f64();
+    bucket.tokens = (bucket.tokens + elapsed * refill_per_second).min(capacity);
+    bucket.last_refill = now;
+    if bucket.tokens >= 1.0 {
+        bucket.tokens -= 1.0;
+        true
+    } else {
+        false
+    }
+}
+
+/// Scopes a collector-chosen source ID so two collectors can never observe
+/// or overwrite one another's ingestion cursor, even if they happen to
+/// report the same local path.
+fn scoped_source_id(collector_id: &str, source_id: &str) -> String {
+    format!("collector:{collector_id}:{source_id}")
+}
+
+/// Recomputes a raw object's content-derived identity, matching
+/// `sessionmesh_ingest::codex::incremental::raw_identity`. Network payloads
+/// re-verify this instead of trusting the collector-declared `id`.
+fn raw_object_identity(generation: &str, offset: u64, bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(generation.as_bytes());
+    hasher.update(offset.to_be_bytes());
+    hasher.update(bytes);
+    let mut value = String::from("sha256:");
+    for byte in hasher.finalize() {
+        write!(&mut value, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    value
+}
+
+async fn ingest_batch(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<IngestBatchResponse>, IngestApiError> {
+    let byte_size = u64::try_from(body.len()).unwrap_or(u64::MAX);
+    let collector = match authenticate_collector(&state, &headers).await {
+        Ok(collector) => collector,
+        Err(error) => {
+            record_audit(&state, None, byte_size, 0, Err(&error)).await;
+            return Err(error);
+        }
+    };
+
+    let outcome = prepare_and_commit_batch(&state, &collector, byte_size, &body).await;
+    let event_count = outcome
+        .as_ref()
+        .map(|response| u64::try_from(response.accepted_events).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    record_audit(
+        &state,
+        Some(collector.id.clone()),
+        byte_size,
+        event_count,
+        outcome.as_ref().map(|_| ()),
+    )
+    .await;
+    outcome.map(Json)
+}
+
+async fn prepare_and_commit_batch(
+    state: &IngestState,
+    collector: &IngestionCollector,
+    byte_size: u64,
+    body: &[u8],
+) -> Result<IngestBatchResponse, IngestApiError> {
+    if !check_rate_limit(state, &collector.id) {
+        return Err(IngestApiError::RateLimited);
+    }
+    if byte_size > state.limits.max_batch_bytes {
+        return Err(IngestApiError::PayloadTooLarge);
+    }
+    let request: IngestBatchRequest = serde_json::from_slice(body)
+        .map_err(|error| IngestApiError::MalformedRequest(error.to_string()))?;
+    if request.events.len() > state.limits.max_events_per_batch {
+        return Err(IngestApiError::TooManyEvents);
+    }
+
+    let events = request
+        .events
+        .iter()
+        .map(|json| {
+            CanonicalEvent::from_json(json)
+                .map_err(|error| IngestApiError::InvalidEvent(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut raw_objects = Vec::with_capacity(request.raw_objects.len());
+    for wire in request.raw_objects {
+        let generation = wire.source_generation.clone();
+        let offset = wire.source_offset;
+        let declared_id = wire.id.clone();
+        let raw = wire
+            .into_raw_object()
+            .map_err(|error| IngestApiError::MalformedRequest(error.to_string()))?;
+        let expected_id = raw_object_identity(&generation, offset, &raw.bytes);
+        if declared_id != expected_id {
+            return Err(IngestApiError::RawObjectIdentityMismatch);
+        }
+        raw_objects.push(raw);
+    }
+
+    let cursor = request
+        .cursor
+        .into_cursor(scoped_source_id(&collector.id, &request.source_id))
+        .map_err(|error| IngestApiError::MalformedRequest(error.to_string()))?;
+    let batch = IngestionBatch {
+        raw_objects,
+        events,
+        cursor,
+    };
+    let accepted_events = batch.events.len();
+    let accepted_raw_objects = batch.raw_objects.len();
+    state
+        .storage
+        .commit_batch(&batch, Some(&collector.id))
+        .await?;
+    Ok(IngestBatchResponse {
+        accepted_events,
+        accepted_raw_objects,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct IngestCursorQuery {
+    source_id: String,
+}
+
+async fn ingest_cursor(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Query(query): Query<IngestCursorQuery>,
+) -> Result<Json<IngestCursorResponse>, IngestApiError> {
+    let collector = match authenticate_collector(&state, &headers).await {
+        Ok(collector) => collector,
+        Err(error) => {
+            record_audit(&state, None, 0, 0, Err(&error)).await;
+            return Err(error);
+        }
+    };
+    let outcome = lookup_cursor(&state, &collector.id, &query.source_id).await;
+    record_audit(
+        &state,
+        Some(collector.id),
+        0,
+        0,
+        outcome.as_ref().map(|_| ()),
+    )
+    .await;
+    outcome.map(Json)
+}
+
+async fn lookup_cursor(
+    state: &IngestState,
+    collector_id: &str,
+    source_id: &str,
+) -> Result<IngestCursorResponse, IngestApiError> {
+    if !check_rate_limit(state, collector_id) {
+        return Err(IngestApiError::RateLimited);
+    }
+    let cursor = state
+        .storage
+        .get_cursor(&scoped_source_id(collector_id, source_id))
+        .await?;
+    Ok(IngestCursorResponse {
+        cursor: cursor.as_ref().map(IngestCursorWire::from),
+    })
+}
+
+async fn record_audit(
+    state: &IngestState,
+    collector_id: Option<String>,
+    byte_size: u64,
+    event_count: u64,
+    outcome: Result<(), &IngestApiError>,
+) {
+    let entry = IngestionAuditEntry {
+        collector_id,
+        occurred_at: chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+            .to_rfc3339(),
+        outcome: if outcome.is_ok() {
+            IngestionAuditOutcome::Accepted
+        } else {
+            IngestionAuditOutcome::Rejected
+        },
+        event_count,
+        byte_size,
+        reason: outcome.err().map(IngestApiError::audit_reason),
+    };
+    // An audit-log write failure must never mask the real ingestion
+    // outcome; it is only ever surfaced to the daemon's own logs.
+    if let Err(error) = state.storage.record_ingestion_audit(&entry).await {
+        eprintln!("sessionmesh: failed to record ingestion audit entry: {error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use axum::body::Body;
     use axum::http::Request;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use http_body_util::BodyExt;
     use sessionmesh_core::event::{
         EventDraft, EventProvenance, EventTimestamp, TimestampPrecision, ToolIdentity,
@@ -1801,6 +2194,414 @@ mod tests {
         assert_eq!(
             state.storage.list_correlation_candidates().await.unwrap()[0].status,
             "accepted"
+        );
+    }
+
+    // --- Network ingestion ------------------------------------------------
+
+    async fn ingest_state(limits: IngestLimits) -> (TempDir, Storage, IngestState) {
+        let directory = tempfile::tempdir().expect("temporary directory should exist");
+        let storage = Storage::open(
+            directory.path().join("sessionmesh.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .expect("storage should open");
+        let ingest_state = IngestState::new(storage.clone(), limits);
+        (directory, storage, ingest_state)
+    }
+
+    fn default_limits() -> IngestLimits {
+        IngestLimits {
+            max_batch_bytes: 1_000_000,
+            max_events_per_batch: 100,
+            rate_limit_per_minute: 0,
+        }
+    }
+
+    fn collector_event(session: &str, sequence: u64) -> CanonicalEvent {
+        CanonicalEvent::from_draft(EventDraft {
+            tool: ToolIdentity {
+                family: "codex".to_owned(),
+                surface: "cli".to_owned(),
+                profile: "default".to_owned(),
+            },
+            native_session_id: session.to_owned(),
+            sequence,
+            timestamp: EventTimestamp::parse("2026-07-20T14:30:00Z")
+                .expect("timestamp should parse"),
+            timestamp_precision: TimestampPrecision::Second,
+            kind: if sequence == 0 {
+                EventKind::SessionStart
+            } else {
+                EventKind::AssistantMessage
+            },
+            workspace: None,
+            payload: BTreeMap::new(),
+            provenance: EventProvenance {
+                source_path: "/collector/rollout.jsonl".to_owned(),
+                original_path: Some("~/.codex/rollout.jsonl".to_owned()),
+                source_offset: sequence,
+                source_generation: "generation-1".to_owned(),
+                adapter_version: "0.1.0".to_owned(),
+                ingestion_sequence: sequence,
+                ordering_confidence: Some(1.0),
+            },
+        })
+        .expect("event should build")
+    }
+
+    fn collector_batch_body(source_id: &str, events: &[CanonicalEvent]) -> String {
+        serde_json::json!({
+            "source_id": source_id,
+            "raw_objects": [],
+            "events": events
+                .iter()
+                .map(|event| event.to_json().expect("event should serialize"))
+                .collect::<Vec<_>>(),
+            "cursor": {
+                "source_generation": "generation-1",
+                "byte_offset": 100,
+                "next_sequence": events.len(),
+                "partial_line_base64": "",
+                "updated_at": "2026-07-20T14:30:05Z",
+            },
+        })
+        .to_string()
+    }
+
+    fn ingest_request(uri: &str, method: &str, token: &str, body: String) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .expect("request should build")
+    }
+
+    #[tokio::test]
+    async fn accepted_batch_commits_events_attributed_to_the_collector_and_is_audited() {
+        let (_directory, storage, ingest_state) = ingest_state(default_limits()).await;
+        let (collector, token) = storage
+            .issue_collector("dedicated-host-1", "2026-07-20T14:00:00Z")
+            .await
+            .expect("collector should be issued");
+        let events = vec![collector_event("remote-session", 0)];
+        let body = collector_batch_body("codex:remote-rollout", &events);
+
+        let response = ingest_router(ingest_state)
+            .oneshot(ingest_request("/api/v1/ingest/batch", "POST", &token, body))
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json(response).await;
+        assert_eq!(body["accepted_events"], 1);
+
+        let session = storage
+            .get_native_session("remote-session")
+            .await
+            .expect("lookup should work")
+            .expect("session should exist");
+        assert_eq!(
+            session.origin_collector_id.as_deref(),
+            Some(collector.id.as_str())
+        );
+
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT outcome, event_count FROM ingestion_audit_log WHERE collector_id = ?",
+        )
+        .bind(&collector.id)
+        .fetch_all(storage.pool())
+        .await
+        .expect("audit rows should be queryable");
+        assert_eq!(rows, vec![("accepted".to_owned(), 1)]);
+    }
+
+    #[tokio::test]
+    async fn unknown_token_is_rejected_and_audited_without_a_collector_attribution() {
+        let (_directory, storage, ingest_state) = ingest_state(default_limits()).await;
+        let events = vec![collector_event("remote-session", 0)];
+        let body = collector_batch_body("codex:remote-rollout", &events);
+
+        let response = ingest_router(ingest_state)
+            .oneshot(ingest_request(
+                "/api/v1/ingest/batch",
+                "POST",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                body,
+            ))
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(storage.event_count().await.unwrap(), 0);
+
+        let rows: Vec<(Option<String>, String)> =
+            sqlx::query_as("SELECT collector_id, outcome FROM ingestion_audit_log")
+                .fetch_all(storage.pool())
+                .await
+                .expect("audit rows should be queryable");
+        assert_eq!(rows, vec![(None, "rejected".to_owned())]);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_cursor_lookup_is_rejected_and_audited() {
+        let (_directory, storage, ingest_state) = ingest_state(default_limits()).await;
+
+        let response = ingest_router(ingest_state)
+            .oneshot(ingest_request(
+                "/api/v1/ingest/cursor?source_id=codex%3Aremote-rollout",
+                "GET",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                String::new(),
+            ))
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let rows: Vec<(Option<String>, String)> =
+            sqlx::query_as("SELECT collector_id, outcome FROM ingestion_audit_log")
+                .fetch_all(storage.pool())
+                .await
+                .expect("audit rows should be queryable");
+        assert_eq!(rows, vec![(None, "rejected".to_owned())]);
+    }
+
+    #[tokio::test]
+    async fn revoked_collector_token_no_longer_authenticates() {
+        let (_directory, storage, ingest_state) = ingest_state(default_limits()).await;
+        let (collector, token) = storage
+            .issue_collector("dedicated-host-1", "2026-07-20T14:00:00Z")
+            .await
+            .expect("collector should be issued");
+        storage
+            .revoke_collector(&collector.id, "2026-07-20T14:05:00Z")
+            .await
+            .expect("revocation should not fail");
+        let events = vec![collector_event("remote-session", 0)];
+        let body = collector_batch_body("codex:remote-rollout", &events);
+
+        let response = ingest_router(ingest_state)
+            .oneshot(ingest_request("/api/v1/ingest/batch", "POST", &token, body))
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn oversized_batch_is_rejected_before_commit() {
+        let (_directory, storage, ingest_state) = ingest_state(IngestLimits {
+            max_batch_bytes: 10,
+            ..default_limits()
+        })
+        .await;
+        let (_collector, token) = storage
+            .issue_collector("dedicated-host-1", "2026-07-20T14:00:00Z")
+            .await
+            .expect("collector should be issued");
+        let events = vec![collector_event("remote-session", 0)];
+        let body = collector_batch_body("codex:remote-rollout", &events);
+
+        let response = ingest_router(ingest_state)
+            .oneshot(ingest_request("/api/v1/ingest/batch", "POST", &token, body))
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(storage.event_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn batch_exceeding_the_event_count_limit_is_rejected() {
+        let (_directory, storage, ingest_state) = ingest_state(IngestLimits {
+            max_events_per_batch: 0,
+            ..default_limits()
+        })
+        .await;
+        let (_collector, token) = storage
+            .issue_collector("dedicated-host-1", "2026-07-20T14:00:00Z")
+            .await
+            .expect("collector should be issued");
+        let events = vec![collector_event("remote-session", 0)];
+        let body = collector_batch_body("codex:remote-rollout", &events);
+
+        let response = ingest_router(ingest_state)
+            .oneshot(ingest_request("/api/v1/ingest/batch", "POST", &token, body))
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(storage.event_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn tampered_raw_object_identity_is_rejected() {
+        let (_directory, storage, ingest_state) = ingest_state(default_limits()).await;
+        let (_collector, token) = storage
+            .issue_collector("dedicated-host-1", "2026-07-20T14:00:00Z")
+            .await
+            .expect("collector should be issued");
+        let body = serde_json::json!({
+            "source_id": "codex:remote-rollout",
+            "raw_objects": [{
+                "id": "sha256:not-the-real-content-hash",
+                "bytes_base64": BASE64.encode(b"line content"),
+                "source_path": "/collector/rollout.jsonl",
+                "original_path": null,
+                "source_offset": 0,
+                "source_size": 12,
+                "source_modified_at": null,
+                "source_permissions": null,
+                "source_generation": "generation-1",
+                "parser_version": "0.1.0",
+                "imported_at": "2026-07-20T14:30:00Z",
+            }],
+            "events": [],
+            "cursor": {
+                "source_generation": "generation-1",
+                "byte_offset": 12,
+                "next_sequence": 0,
+                "partial_line_base64": "",
+                "updated_at": "2026-07-20T14:30:05Z",
+            },
+        })
+        .to_string();
+
+        let response = ingest_router(ingest_state)
+            .oneshot(ingest_request("/api/v1/ingest/batch", "POST", &token, body))
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload = json(response).await;
+        assert_eq!(payload["code"], "raw_object_identity_mismatch");
+    }
+
+    #[tokio::test]
+    async fn tampered_event_id_is_rejected() {
+        let (_directory, storage, ingest_state) = ingest_state(default_limits()).await;
+        let (_collector, token) = storage
+            .issue_collector("dedicated-host-1", "2026-07-20T14:00:00Z")
+            .await
+            .expect("collector should be issued");
+        let mut event_json: serde_json::Value =
+            serde_json::from_str(&collector_event("remote-session", 0).to_json().unwrap()).unwrap();
+        event_json["event_id"] = serde_json::Value::String(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+        );
+        let body = serde_json::json!({
+            "source_id": "codex:remote-rollout",
+            "raw_objects": [],
+            "events": [event_json.to_string()],
+            "cursor": {
+                "source_generation": "generation-1",
+                "byte_offset": 100,
+                "next_sequence": 1,
+                "partial_line_base64": "",
+                "updated_at": "2026-07-20T14:30:05Z",
+            },
+        })
+        .to_string();
+
+        let response = ingest_router(ingest_state)
+            .oneshot(ingest_request("/api/v1/ingest/batch", "POST", &token, body))
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(storage.event_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_rejects_the_second_request_within_the_window() {
+        let (_directory, storage, ingest_state) = ingest_state(IngestLimits {
+            rate_limit_per_minute: 1,
+            ..default_limits()
+        })
+        .await;
+        let (_collector, token) = storage
+            .issue_collector("dedicated-host-1", "2026-07-20T14:00:00Z")
+            .await
+            .expect("collector should be issued");
+        let router = ingest_router(ingest_state);
+
+        let first = router
+            .clone()
+            .oneshot(ingest_request(
+                "/api/v1/ingest/cursor?source_id=codex%3Aremote-rollout",
+                "GET",
+                &token,
+                String::new(),
+            ))
+            .await
+            .expect("request should complete");
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = router
+            .oneshot(ingest_request(
+                "/api/v1/ingest/cursor?source_id=codex%3Aremote-rollout",
+                "GET",
+                &token,
+                String::new(),
+            ))
+            .await
+            .expect("request should complete");
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn cursor_is_scoped_per_collector_and_round_trips() {
+        let (_directory, storage, ingest_state) = ingest_state(default_limits()).await;
+        let (_first, first_token) = storage
+            .issue_collector("dedicated-host-1", "2026-07-20T14:00:00Z")
+            .await
+            .expect("collector should be issued");
+        let (_second, second_token) = storage
+            .issue_collector("dedicated-host-2", "2026-07-20T14:00:00Z")
+            .await
+            .expect("collector should be issued");
+        let router = ingest_router(ingest_state);
+
+        let events = vec![collector_event("remote-session", 0)];
+        let body = collector_batch_body("codex:same-local-path", &events);
+        let commit = router
+            .clone()
+            .oneshot(ingest_request(
+                "/api/v1/ingest/batch",
+                "POST",
+                &first_token,
+                body,
+            ))
+            .await
+            .expect("request should complete");
+        assert_eq!(commit.status(), StatusCode::OK);
+
+        let first_cursor = json(
+            router
+                .clone()
+                .oneshot(ingest_request(
+                    "/api/v1/ingest/cursor?source_id=codex%3Asame-local-path",
+                    "GET",
+                    &first_token,
+                    String::new(),
+                ))
+                .await
+                .expect("request should complete"),
+        )
+        .await;
+        assert_eq!(first_cursor["cursor"]["byte_offset"], 100);
+
+        let second_cursor = json(
+            router
+                .oneshot(ingest_request(
+                    "/api/v1/ingest/cursor?source_id=codex%3Asame-local-path",
+                    "GET",
+                    &second_token,
+                    String::new(),
+                ))
+                .await
+                .expect("request should complete"),
+        )
+        .await;
+        assert!(
+            second_cursor["cursor"].is_null(),
+            "a different collector must never observe another collector's cursor for the same reported source_id"
         );
     }
 }
