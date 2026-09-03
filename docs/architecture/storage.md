@@ -28,6 +28,19 @@ Existing content is verified before reuse. SQLite metadata, normalized events,
 and the corresponding ingestion cursor commit in one transaction. A failed
 batch therefore cannot advertise progress beyond visible events.
 
+The write path above is shared by local (in-process) ingestion and network
+ingestion from a remote collector — the same atomic transaction commits
+either way. A batch attributed to a remote collector additionally records
+which one: `native_sessions.origin_collector_id` is set from the
+authenticated collector's identity (`NULL` for local ingestion), so
+downstream cross-tool correlation can require a matching origin — not just a
+matching path — before treating two sessions as the same physical workspace.
+Two collector-specific tables support this boundary and are covered by the
+[network ingestion API reference](../api/ingest.md): `ingestion_collectors`
+holds each collector's non-secret identity and hashed bearer token (the raw
+token is never persisted), and `ingestion_audit_log` records every accepted
+and rejected ingestion attempt, authenticated or not.
+
 ## Database behavior
 
 - SQLite runs in WAL mode with foreign keys enabled.
