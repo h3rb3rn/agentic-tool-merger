@@ -41,6 +41,9 @@ changes to SessionMesh are recorded here.
   before treating two sessions' identical `cwd` as the same physical
   workspace, so two unrelated hosts checking out a repository under the
   same path are never merged.
+- Network ingestion API reference (`docs/api/ingest.md`), a threat-model
+  boundary entry and residual-risk notes for it, and storage-architecture
+  coverage of the collector token and audit tables.
 - Beginner-oriented setup and usage guide covering service checks, connector
   installation, Web UI authentication, native resume, cross-tool rate-limit
   handoff, correlation review, manual fallback, and troubleshooting.
