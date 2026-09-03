@@ -8,7 +8,8 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use sessionmesh_api::{ApiState, router};
+use axum_server::tls_rustls::RustlsConfig;
+use sessionmesh_api::{ApiState, IngestLimits, IngestState, ingest_router, router};
 use sessionmesh_core::configuration::{ConfigInputs, ConfigLayer, resolve, user_config_path};
 use sessionmesh_handoff::{LocalExtractor, OpenAiCompatibleExtractor};
 use sessionmesh_ingest::codex::{
@@ -40,6 +41,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         cli: ConfigLayer::default(),
     })?;
     let storage = Storage::open(&config.database_path.value, &config.blob_store_path.value).await?;
+    let ingest_storage = storage.clone();
     let token = provision_local_token(&config.home.value)?;
     let extractor: Option<std::sync::Arc<dyn LocalExtractor>> = config
         .llm_endpoint
@@ -84,6 +86,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         profile_root,
         original_profile_root,
         config.watch_debounce_ms.value,
+        config.reconcile_interval_ms.value,
         config.correlation_threshold.value,
     ));
     let address = SocketAddr::new(config.bind_address.value, config.port.value);
@@ -92,28 +95,97 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let application = router(state).fallback_service(
         ServeDir::new(&web_root).fallback(ServeFile::new(web_root.join("index.html"))),
     );
-    axum::serve(listener, application).await?;
+
+    if config.network_ingestion_enabled.value {
+        let ingest_server = bind_ingest_server(&config, ingest_storage).await?;
+        tokio::try_join!(
+            async { axum::serve(listener, application).await },
+            ingest_server,
+        )?;
+    } else {
+        axum::serve(listener, application).await?;
+    }
     Ok(())
 }
 
+/// Builds the TLS-terminated network ingestion server for remote
+/// collectors, on its own listener and port, separate from the local API
+/// served above. Only called when `network_ingestion_enabled = true`, which
+/// `configuration::resolve` already guarantees means `allow_network = true`
+/// and both TLS paths are set.
+async fn bind_ingest_server(
+    config: &sessionmesh_core::configuration::AppConfig,
+    storage: Storage,
+) -> Result<impl std::future::Future<Output = std::io::Result<()>>, Box<dyn Error>> {
+    // `tls-rustls-no-provider` requires the process to explicitly select a
+    // crypto backend once. Uses `ring`, matching the backend already linked
+    // in via `reqwest`'s `rustls-tls` feature, so no second TLS backend (and
+    // its own native-code build dependency) enters the dependency graph.
+    // Installing twice is harmless; only the first call wins.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let cert_path = config
+        .ingest_tls_cert_path
+        .value
+        .as_ref()
+        .ok_or("ingest_tls_cert_path is required when network ingestion is enabled")?;
+    let key_path = config
+        .ingest_tls_key_path
+        .value
+        .as_ref()
+        .ok_or("ingest_tls_key_path is required when network ingestion is enabled")?;
+    let tls_config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
+
+    let limits = IngestLimits {
+        max_batch_bytes: config.ingest_max_batch_bytes.value,
+        max_events_per_batch: config.ingest_max_events_per_batch.value,
+        rate_limit_per_minute: config.ingest_rate_limit_per_minute.value,
+    };
+    let ingest_app = ingest_router(IngestState::new(storage, limits));
+    let ingest_address =
+        SocketAddr::new(config.ingest_bind_address.value, config.ingest_port.value);
+    Ok(axum_server::bind_rustls(ingest_address, tls_config).serve(ingest_app.into_make_service()))
+}
+
+/// Runs discovery/ingest and correlation reconciliation on independent
+/// intervals.
+///
+/// Discovery and incremental ingest are cheap (bounded directory reads and
+/// offset-based file reads) and can run frequently. Reconciliation cost
+/// grows with the total accumulated session history (it reloads and
+/// re-scores session summaries), so it runs on its own, much slower
+/// interval and only when discovery/ingest actually produced new data since
+/// the last reconciliation pass.
 async fn run_ingestion(
     state: ApiState,
     discovery_input: CodexDiscoveryInput,
     profile_root: PathBuf,
     original_profile_root: PathBuf,
-    interval_ms: u64,
+    scan_interval_ms: u64,
+    reconcile_interval_ms: u64,
     correlation_threshold: f64,
 ) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+    let mut scan_interval =
+        tokio::time::interval(std::time::Duration::from_millis(scan_interval_ms));
+    let mut reconcile_interval =
+        tokio::time::interval(std::time::Duration::from_millis(reconcile_interval_ms));
+    let mut dirty = false;
     loop {
-        interval.tick().await;
-        let mut changed = scan_codex_once(&state, &discovery_input).await;
-        let external_sources = external_sources(&profile_root, &original_profile_root);
-        let opencode_source = discover_opencode(&profile_root, &original_profile_root);
-        changed |= scan_external_once(&state, &external_sources).await;
-        changed |= scan_opencode_once(&state, opencode_source.as_ref()).await;
-        if changed {
-            let _ = reconcile_and_refresh(&state, correlation_threshold).await;
+        tokio::select! {
+            _ = scan_interval.tick() => {
+                let mut changed = scan_codex_once(&state, &discovery_input).await;
+                let external_sources = external_sources(&profile_root, &original_profile_root);
+                let opencode_source = discover_opencode(&profile_root, &original_profile_root);
+                changed |= scan_external_once(&state, &external_sources).await;
+                changed |= scan_opencode_once(&state, opencode_source.as_ref()).await;
+                dirty |= changed;
+            }
+            _ = reconcile_interval.tick() => {
+                if dirty {
+                    dirty = false;
+                    let _ = reconcile_and_refresh(&state, correlation_threshold).await;
+                }
+            }
         }
     }
 }
@@ -209,6 +281,12 @@ struct SessionSummary {
     content_terms: BTreeSet<String>,
     started_at: chrono::DateTime<chrono::FixedOffset>,
     ended_at: chrono::DateTime<chrono::FixedOffset>,
+    /// Remote collector this session was ingested from, `None` for the
+    /// local daemon. Two sessions reporting the identical `cwd` are only
+    /// the same physical workspace when this also matches — otherwise a
+    /// coincidental path match across two unrelated hosts would otherwise
+    /// be treated as one workspace by `correlation_evidence`.
+    origin_collector_id: Option<String>,
 }
 
 #[allow(
@@ -378,6 +456,12 @@ async fn refresh_pending_candidate_evidence(
 async fn session_summaries(
     storage: &Storage,
 ) -> Result<Vec<SessionSummary>, Box<dyn Error + Send + Sync>> {
+    let origins: BTreeMap<String, Option<String>> = storage
+        .list_native_sessions()
+        .await?
+        .into_iter()
+        .map(|session| (session.id, session.origin_collector_id))
+        .collect();
     let mut grouped = BTreeMap::<String, Vec<sessionmesh_core::event::CanonicalEvent>>::new();
     for event in storage.list_canonical_events().await? {
         grouped
@@ -431,6 +515,7 @@ async fn session_summaries(
             })
             .flat_map(content_terms)
             .collect();
+        let origin_collector_id = origins.get(&id).cloned().flatten();
         summaries.push(SessionSummary {
             id,
             tool_family: events
@@ -441,6 +526,7 @@ async fn session_summaries(
             content_terms,
             started_at,
             ended_at,
+            origin_collector_id,
         });
     }
     summaries.sort_by_key(|summary| summary.started_at);
@@ -455,7 +541,13 @@ struct CorrelationEvidence {
 }
 
 fn correlation_evidence(left: &SessionSummary, right: &SessionSummary) -> CorrelationEvidence {
-    let same_workspace = left.cwd.is_some() && left.cwd == right.cwd;
+    // A `cwd` match only means the same physical workspace when both
+    // sessions were also observed from the same origin (both local, or the
+    // same remote collector) — otherwise two unrelated hosts that happen to
+    // check out a repository under an identical path would be merged.
+    let same_workspace = left.cwd.is_some()
+        && left.cwd == right.cwd
+        && left.origin_collector_id == right.origin_collector_id;
     let gap_seconds = temporal_gap(left, right);
     let temporally_close = gap_seconds <= 7 * 24 * 60 * 60;
     let shared_terms = left
@@ -650,6 +742,15 @@ mod tests {
     use super::*;
 
     fn summary(tool_family: &str, cwd: &str, terms: &[&str]) -> SessionSummary {
+        summary_with_origin(tool_family, cwd, terms, None)
+    }
+
+    fn summary_with_origin(
+        tool_family: &str,
+        cwd: &str,
+        terms: &[&str],
+        origin_collector_id: Option<&str>,
+    ) -> SessionSummary {
         SessionSummary {
             id: format!("{tool_family}:session"),
             tool_family: tool_family.to_owned(),
@@ -661,6 +762,7 @@ mod tests {
                 .iter()
                 .map(|term| (*term).to_owned())
                 .collect::<BTreeSet<_>>(),
+            origin_collector_id: origin_collector_id.map(str::to_owned),
         }
     }
 
@@ -696,6 +798,80 @@ mod tests {
             content_evidence["shared_terms"],
             serde_json::json!(["parser", "session"])
         );
+    }
+
+    #[test]
+    fn identical_cwd_across_different_origins_is_not_treated_as_the_same_workspace() {
+        // Partial term overlap, mirroring the "same_work" case in
+        // content_correlation_is_explainable_across_tool_families: high
+        // enough that the score still clears 0.8 when the workspace signal
+        // legitimately matches, but low enough that losing that signal's
+        // 0.65 weight visibly drops the score below the threshold. This
+        // isolates the origin check from the separately-intentional
+        // "identical content, different cwd" path (content-similarity
+        // weight 0.85), which that other test already covers and which must
+        // keep scoring near 1.0 regardless of origin.
+        let left = summary_with_origin(
+            "codex",
+            "/work/project",
+            &["parser", "session", "sqlite"],
+            None,
+        );
+        let same_local =
+            summary_with_origin("opencode", "/work/project", &["parser", "session"], None);
+        let collector_a = summary_with_origin(
+            "codex",
+            "/work/project",
+            &["parser", "session"],
+            Some("collector_a"),
+        );
+        let collector_b = summary_with_origin(
+            "opencode",
+            "/work/project",
+            &["parser"],
+            Some("collector_b"),
+        );
+        let collector_a_again = summary_with_origin(
+            "opencode",
+            "/work/project",
+            &["parser", "session"],
+            Some("collector_a"),
+        );
+
+        let both_local = correlation_evidence(&left, &same_local);
+        let local_vs_remote = correlation_evidence(&left, &collector_a);
+        let two_different_remotes = correlation_evidence(&collector_a, &collector_b);
+        let same_remote_twice = correlation_evidence(&collector_a, &collector_a_again);
+
+        assert!(
+            both_local.score >= 0.8,
+            "two local sessions sharing a cwd should still correlate as one workspace"
+        );
+        assert!(
+            same_remote_twice.score >= 0.8,
+            "two sessions from the same collector sharing a cwd should still correlate"
+        );
+        assert!(
+            local_vs_remote.score < 0.8,
+            "an identical path reported by the local daemon and a remote collector must \
+             not be treated as the same workspace: they are different filesystems"
+        );
+        assert!(
+            two_different_remotes.score < 0.8,
+            "an identical path reported by two different collectors must not be treated \
+             as the same workspace: they are different hosts"
+        );
+        for evidence in [&local_vs_remote, &two_different_remotes] {
+            let workspace_evidence = evidence
+                .details
+                .iter()
+                .find_map(|detail| {
+                    let value = serde_json::from_str::<serde_json::Value>(detail).ok()?;
+                    (value["signal"] == "workspace").then_some(value)
+                })
+                .expect("workspace evidence should be present");
+            assert_eq!(workspace_evidence["matched"], false);
+        }
     }
 
     #[test]

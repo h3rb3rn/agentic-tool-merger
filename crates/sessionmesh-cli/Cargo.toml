@@ -6,7 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono.workspace = true
 sessionmesh-core = { path = "../sessionmesh-core" }
+sessionmesh-storage = { path = "../sessionmesh-storage" }
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -104,6 +104,8 @@ pub struct StoredNativeSession {
     pub started_at: Option<String>,
     /// Latest observed end timestamp.
     pub ended_at: Option<String>,
+    /// Remote collector this session was ingested from, if not local.
+    pub origin_collector_id: Option<String>,
 }
 
 /// Global work context referencing native sessions without copying them.
@@ -132,6 +134,114 @@ pub struct StoredSessionMember {
     pub correlation_version: String,
     /// Explicit state, if manually decided.
     pub manual_state: Option<String>,
+}
+
+/// A registered remote ingestion collector's non-secret identity.
+///
+/// The bearer token itself is never stored or returned after issuance; only
+/// its salted hash is retained for authentication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IngestionCollector {
+    /// Collector identity, used to namespace and audit its ingested data.
+    pub id: String,
+    /// Human-readable label (e.g. the dedicated system's hostname).
+    pub label: String,
+    /// Issuance timestamp.
+    pub created_at: String,
+    /// Revocation timestamp, once revoked.
+    pub revoked_at: Option<String>,
+}
+
+/// Outcome of one network ingestion attempt, for the audit log.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IngestionAuditOutcome {
+    /// The batch was authenticated, validated, and committed.
+    Accepted,
+    /// The batch was rejected before or during commit.
+    Rejected,
+}
+
+impl IngestionAuditOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// One recorded network ingestion attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IngestionAuditEntry {
+    /// Authenticated collector, when a token was successfully resolved.
+    pub collector_id: Option<String>,
+    /// When the attempt was handled.
+    pub occurred_at: String,
+    /// Accepted or rejected.
+    pub outcome: IngestionAuditOutcome,
+    /// Number of canonical events in the attempted batch.
+    pub event_count: u64,
+    /// Wire size of the attempted payload in bytes.
+    pub byte_size: u64,
+    /// Non-secret rejection reason, when rejected.
+    pub reason: Option<String>,
+}
+
+/// Repository contract for issuing, authenticating, and auditing remote
+/// ingestion collectors.
+///
+/// Kept separate from [`CursorRepository`] because collector identity is an
+/// authentication and audit concern, not an ingestion-progress concern: a
+/// local daemon scan never touches this trait.
+#[async_trait]
+pub trait IngestionTokenRepository {
+    /// Issues a new collector and its one-time bearer token.
+    ///
+    /// The returned token is the only time the raw secret is available; only
+    /// its hash is persisted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if persistence or entropy generation fails.
+    async fn issue_collector(
+        &self,
+        label: &str,
+        created_at: &str,
+    ) -> Result<(IngestionCollector, String), StorageError>;
+
+    /// Resolves a bearer token to its non-revoked collector, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the lookup fails.
+    async fn authenticate_collector(
+        &self,
+        token: &str,
+    ) -> Result<Option<IngestionCollector>, StorageError>;
+
+    /// Revokes a collector so its token no longer authenticates.
+    ///
+    /// Returns `false` when no matching, not-yet-revoked collector exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if persistence fails.
+    async fn revoke_collector(&self, id: &str, revoked_at: &str) -> Result<bool, StorageError>;
+
+    /// Lists all registered collectors, revoked or not.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the query fails.
+    async fn list_collectors(&self) -> Result<Vec<IngestionCollector>, StorageError>;
+
+    /// Records one network ingestion attempt, accepted or rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if persistence fails.
+    async fn record_ingestion_audit(&self, entry: &IngestionAuditEntry)
+    -> Result<(), StorageError>;
 }
 
 /// Explainable proposed relationship between two native sessions.
@@ -453,7 +563,7 @@ impl Storage {
     /// Returns a database error when the query fails.
     pub async fn list_native_sessions(&self) -> Result<Vec<StoredNativeSession>, StorageError> {
         let rows = sqlx::query(
-            "SELECT id, tool_family, surface, profile, started_at, ended_at
+            "SELECT id, tool_family, surface, profile, started_at, ended_at, origin_collector_id
              FROM native_sessions ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -467,6 +577,7 @@ impl Storage {
                 profile: row.get("profile"),
                 started_at: row.get("started_at"),
                 ended_at: row.get("ended_at"),
+                origin_collector_id: row.get("origin_collector_id"),
             })
             .collect())
     }
@@ -481,7 +592,7 @@ impl Storage {
         id: &str,
     ) -> Result<Option<StoredNativeSession>, StorageError> {
         let row = sqlx::query(
-            "SELECT id, tool_family, surface, profile, started_at, ended_at
+            "SELECT id, tool_family, surface, profile, started_at, ended_at, origin_collector_id
              FROM native_sessions WHERE id = ?",
         )
         .bind(id)
@@ -494,6 +605,7 @@ impl Storage {
             profile: row.get("profile"),
             started_at: row.get("started_at"),
             ended_at: row.get("ended_at"),
+            origin_collector_id: row.get("origin_collector_id"),
         }))
     }
 
@@ -508,6 +620,42 @@ impl Storage {
         let rows = sqlx::query("SELECT canonical_json FROM native_events")
             .fetch_all(&self.pool)
             .await?;
+        rows.into_iter()
+            .map(|row| {
+                let json: String = row.get("canonical_json");
+                CanonicalEvent::from_json(&json)
+                    .map_err(|error| StorageError::Serialization(error.to_string()))
+            })
+            .collect()
+    }
+
+    /// Loads canonical events restricted to the given native session identifiers.
+    ///
+    /// Uses the `native_events_session_sequence` index instead of a full table
+    /// scan, keeping cost proportional to the requested sessions rather than
+    /// the entire event history.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or canonical JSON validation error.
+    pub async fn list_canonical_events_for_sessions(
+        &self,
+        native_session_ids: &[String],
+    ) -> Result<Vec<CanonicalEvent>, StorageError> {
+        if native_session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", native_session_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT canonical_json FROM native_events WHERE native_session_id IN ({placeholders})"
+        );
+        let mut query = sqlx::query(&sql);
+        for id in native_session_ids {
+            query = query.bind(id);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|row| {
                 let json: String = row.get("canonical_json");
@@ -1258,7 +1406,14 @@ pub trait CursorRepository {
     async fn get_cursor(&self, source_id: &str) -> Result<Option<IngestionCursor>, StorageError>;
 
     /// Commits raw objects, events, and the new cursor atomically.
-    async fn commit_batch(&self, batch: &IngestionBatch) -> Result<(), StorageError>;
+    ///
+    /// `origin_collector_id` attributes newly created native sessions to a
+    /// remote [`IngestionCollector`]; pass `None` for local daemon ingestion.
+    async fn commit_batch(
+        &self,
+        batch: &IngestionBatch,
+        origin_collector_id: Option<&str>,
+    ) -> Result<(), StorageError>;
 }
 
 #[async_trait]
@@ -1288,7 +1443,7 @@ impl RawObjectRepository for Storage {
 impl EventRepository for Storage {
     async fn store_event(&self, event: &CanonicalEvent) -> Result<bool, StorageError> {
         let mut transaction = self.pool.begin().await?;
-        let inserted = insert_event(&mut transaction, event, None).await?;
+        let inserted = insert_event(&mut transaction, event, None, None).await?;
         transaction.commit().await?;
         Ok(inserted)
     }
@@ -1326,7 +1481,11 @@ impl CursorRepository for Storage {
         .transpose()
     }
 
-    async fn commit_batch(&self, batch: &IngestionBatch) -> Result<(), StorageError> {
+    async fn commit_batch(
+        &self,
+        batch: &IngestionBatch,
+        origin_collector_id: Option<&str>,
+    ) -> Result<(), StorageError> {
         validate_cursor(&batch.cursor)?;
         let mut blob_hashes = Vec::with_capacity(batch.raw_objects.len());
         for raw in &batch.raw_objects {
@@ -1346,12 +1505,138 @@ impl CursorRepository for Storage {
                         && raw.source_offset == event.provenance.source_offset
                 })
                 .map(|raw| raw.id.as_str());
-            insert_event(&mut transaction, event, raw_object_id).await?;
+            insert_event(&mut transaction, event, raw_object_id, origin_collector_id).await?;
         }
         upsert_cursor(&mut transaction, &batch.cursor).await?;
         transaction.commit().await?;
         Ok(())
     }
+}
+
+#[async_trait]
+impl IngestionTokenRepository for Storage {
+    async fn issue_collector(
+        &self,
+        label: &str,
+        created_at: &str,
+    ) -> Result<(IngestionCollector, String), StorageError> {
+        validate_non_empty("collector.label", label)?;
+        validate_non_empty("collector.created_at", created_at)?;
+        let id = format!("collector_{}", random_hex(16)?);
+        let token = random_hex(32)?;
+        let token_hash = hex_digest(token.as_bytes());
+        sqlx::query(
+            "INSERT INTO ingestion_collectors (id, label, token_hash, created_at)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(label)
+        .bind(&token_hash)
+        .bind(created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok((
+            IngestionCollector {
+                id,
+                label: label.to_owned(),
+                created_at: created_at.to_owned(),
+                revoked_at: None,
+            },
+            token,
+        ))
+    }
+
+    async fn authenticate_collector(
+        &self,
+        token: &str,
+    ) -> Result<Option<IngestionCollector>, StorageError> {
+        let token_hash = hex_digest(token.as_bytes());
+        let row = sqlx::query(
+            "SELECT id, label, created_at, revoked_at FROM ingestion_collectors
+             WHERE token_hash = ? AND revoked_at IS NULL",
+        )
+        .bind(&token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| IngestionCollector {
+            id: row.get("id"),
+            label: row.get("label"),
+            created_at: row.get("created_at"),
+            revoked_at: row.get("revoked_at"),
+        }))
+    }
+
+    async fn revoke_collector(&self, id: &str, revoked_at: &str) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE ingestion_collectors SET revoked_at = ?
+             WHERE id = ? AND revoked_at IS NULL",
+        )
+        .bind(revoked_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn list_collectors(&self) -> Result<Vec<IngestionCollector>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, label, created_at, revoked_at FROM ingestion_collectors ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| IngestionCollector {
+                id: row.get("id"),
+                label: row.get("label"),
+                created_at: row.get("created_at"),
+                revoked_at: row.get("revoked_at"),
+            })
+            .collect())
+    }
+
+    async fn record_ingestion_audit(
+        &self,
+        entry: &IngestionAuditEntry,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO ingestion_audit_log (
+                collector_id, occurred_at, outcome, event_count, byte_size, reason
+             ) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&entry.collector_id)
+        .bind(entry.occurred_at.as_str())
+        .bind(entry.outcome.as_str())
+        .bind(to_i64(entry.event_count, "event_count")?)
+        .bind(to_i64(entry.byte_size, "byte_size")?)
+        .bind(entry.reason.as_deref())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+/// Generates `byte_count` random bytes encoded as lowercase hex.
+fn random_hex(byte_count: usize) -> Result<String, StorageError> {
+    let mut bytes = vec![0_u8; byte_count];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| StorageError::Io(std::io::Error::other(format!("{error}"))))?;
+    let mut value = String::with_capacity(byte_count * 2);
+    for byte in bytes {
+        write!(&mut value, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(value)
+}
+
+/// Plain lowercase-hex SHA-256 digest, without the `sha256:` content-address
+/// prefix used for blob hashes.
+fn hex_digest(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut value = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut value, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    value
 }
 
 async fn insert_raw(
@@ -1413,19 +1698,21 @@ async fn insert_event(
     transaction: &mut Transaction<'_, Sqlite>,
     event: &CanonicalEvent,
     raw_object_id: Option<&str>,
+    origin_collector_id: Option<&str>,
 ) -> Result<bool, StorageError> {
     let canonical_json = event
         .to_json()
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     sqlx::query(
-        "INSERT INTO native_sessions (id, tool_family, surface, profile)
-         VALUES (?, ?, ?, ?)
+        "INSERT INTO native_sessions (id, tool_family, surface, profile, origin_collector_id)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(id) DO NOTHING",
     )
     .bind(&event.native_session_id)
     .bind(&event.tool.family)
     .bind(&event.tool.surface)
     .bind(&event.tool.profile)
+    .bind(origin_collector_id)
     .execute(&mut **transaction)
     .await?;
     if event.kind == sessionmesh_core::event::EventKind::SessionStart {
@@ -1879,7 +2166,7 @@ mod tests {
         };
 
         let error = storage
-            .commit_batch(&batch)
+            .commit_batch(&batch, None)
             .await
             .expect_err("immutable conflict should abort batch");
         assert!(matches!(error, StorageError::ImmutableConflict { .. }));
@@ -1913,7 +2200,7 @@ mod tests {
         };
 
         storage
-            .commit_batch(&batch)
+            .commit_batch(&batch, None)
             .await
             .expect("valid batch should commit");
 
@@ -1924,6 +2211,140 @@ mod tests {
                 .await
                 .expect("cursor lookup works"),
             Some(batch.cursor)
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_batch_attributes_new_sessions_to_the_origin_collector() {
+        let (_directory, storage) = test_storage().await;
+        let batch = IngestionBatch {
+            raw_objects: vec![raw("raw-1", b"line")],
+            events: vec![event(1)],
+            cursor: cursor(100),
+        };
+
+        storage
+            .commit_batch(&batch, Some("collector_abc"))
+            .await
+            .expect("valid batch should commit");
+
+        let session = storage
+            .get_native_session(&batch.events[0].native_session_id)
+            .await
+            .expect("lookup should work")
+            .expect("session should exist");
+        assert_eq!(
+            session.origin_collector_id.as_deref(),
+            Some("collector_abc")
+        );
+    }
+
+    #[tokio::test]
+    async fn collector_token_issuance_authentication_and_revocation() {
+        let (_directory, storage) = test_storage().await;
+        let (collector, token) = storage
+            .issue_collector("dedicated-host-1", "2026-07-20T14:30:00Z")
+            .await
+            .expect("collector should be issued");
+        assert_eq!(token.len(), 64);
+        assert!(
+            token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+
+        let authenticated = storage
+            .authenticate_collector(&token)
+            .await
+            .expect("authentication should not fail")
+            .expect("token should resolve to the issued collector");
+        assert_eq!(authenticated.id, collector.id);
+        assert!(authenticated.revoked_at.is_none());
+
+        assert!(
+            storage
+                .authenticate_collector(
+                    "0000000000000000000000000000000000000000000000000000000000000000"
+                )
+                .await
+                .expect("authentication should not fail")
+                .is_none(),
+            "an unknown token must never authenticate"
+        );
+
+        let revoked = storage
+            .revoke_collector(&collector.id, "2026-07-20T15:00:00Z")
+            .await
+            .expect("revocation should not fail");
+        assert!(revoked);
+        assert!(
+            !storage
+                .revoke_collector(&collector.id, "2026-07-20T15:01:00Z")
+                .await
+                .expect("revocation should not fail"),
+            "revoking an already-revoked collector reports no change"
+        );
+
+        assert!(
+            storage
+                .authenticate_collector(&token)
+                .await
+                .expect("authentication should not fail")
+                .is_none(),
+            "a revoked token must not authenticate"
+        );
+
+        let collectors = storage
+            .list_collectors()
+            .await
+            .expect("listing should not fail");
+        assert_eq!(collectors.len(), 1);
+        assert!(collectors[0].revoked_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn ingestion_audit_log_records_accepted_and_rejected_attempts() {
+        let (_directory, storage) = test_storage().await;
+        let (collector, _token) = storage
+            .issue_collector("dedicated-host-1", "2026-07-20T14:30:00Z")
+            .await
+            .expect("collector should be issued");
+
+        storage
+            .record_ingestion_audit(&IngestionAuditEntry {
+                collector_id: Some(collector.id.clone()),
+                occurred_at: "2026-07-20T14:31:00Z".to_owned(),
+                outcome: IngestionAuditOutcome::Accepted,
+                event_count: 3,
+                byte_size: 512,
+                reason: None,
+            })
+            .await
+            .expect("accepted audit entry should persist");
+        storage
+            .record_ingestion_audit(&IngestionAuditEntry {
+                collector_id: None,
+                occurred_at: "2026-07-20T14:32:00Z".to_owned(),
+                outcome: IngestionAuditOutcome::Rejected,
+                event_count: 0,
+                byte_size: 4096,
+                reason: Some("payload exceeds max batch bytes".to_owned()),
+            })
+            .await
+            .expect("rejected audit entry should persist");
+
+        let rows: Vec<(Option<String>, String, i64)> = sqlx::query_as(
+            "SELECT collector_id, outcome, event_count FROM ingestion_audit_log ORDER BY id",
+        )
+        .fetch_all(storage.pool())
+        .await
+        .expect("audit rows should be queryable");
+        assert_eq!(
+            rows,
+            vec![
+                (Some(collector.id), "accepted".to_owned(), 3),
+                (None, "rejected".to_owned(), 0),
+            ]
         );
     }
 

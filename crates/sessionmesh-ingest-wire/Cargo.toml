@@ -1,20 +1,16 @@
 [package]
-name = "sessionmesh-storage"
+name = "sessionmesh-ingest-wire"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-async-trait.workspace = true
-getrandom.workspace = true
+base64 = "0.23.1"
+serde.workspace = true
+serde_json.workspace = true
 sessionmesh-core = { path = "../sessionmesh-core" }
-sha2.workspace = true
-sqlx.workspace = true
-tokio.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
+sessionmesh-storage = { path = "../sessionmesh-storage" }
 
 [lints]
 workspace = true

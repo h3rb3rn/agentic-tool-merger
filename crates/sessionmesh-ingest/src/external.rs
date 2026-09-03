@@ -104,6 +104,13 @@ pub fn discover_agy(home: &Path, original_home: &Path) -> Vec<ExternalSource> {
         .collect()
 }
 
+/// Stable source identity used to key the ingestion cursor, before any
+/// server-side collector scoping.
+#[must_use]
+pub fn external_source_id(source: &ExternalSource) -> String {
+    format!("{}:{}", source.tool.family(), source.path.to_string_lossy())
+}
+
 /// Imports a changed snapshot atomically while preserving immutable raw bytes.
 ///
 /// Unchanged metadata fingerprints avoid reparsing. Changed snapshots are
@@ -119,18 +126,43 @@ pub async fn ingest_external(
     source: &ExternalSource,
     imported_at: &str,
 ) -> Result<ExternalImport, ExternalError> {
-    let metadata = tokio::fs::metadata(&source.path).await?;
-    let source_id = format!("{}:{}", source.tool.family(), source.path.to_string_lossy());
-    let fingerprint = metadata_fingerprint(&source.path, &metadata);
-    if storage
-        .get_cursor(&source_id)
-        .await?
-        .is_some_and(|cursor| cursor.source_generation == fingerprint)
-    {
+    let source_id = external_source_id(source);
+    let prior = storage.get_cursor(&source_id).await?;
+    let Some(batch) = prepare_external(source, imported_at, prior.as_ref()).await? else {
         return Ok(ExternalImport {
             changed: false,
             events: Vec::new(),
         });
+    };
+    let events = batch.events.clone();
+    storage.commit_batch(&batch, None).await?;
+    Ok(ExternalImport {
+        changed: true,
+        events,
+    })
+}
+
+/// Prepares a changed external snapshot for atomic commit, or `None` when
+/// `prior_cursor`'s fingerprint already matches the current file and
+/// nothing changed.
+///
+/// Performs no storage access, so it is reusable by both local ingestion
+/// (which commits the result directly) and a network collector (which POSTs
+/// it to the daemon's ingestion API instead).
+///
+/// # Errors
+///
+/// Returns [`ExternalError`] when the source cannot be read or parsed.
+pub async fn prepare_external(
+    source: &ExternalSource,
+    imported_at: &str,
+    prior_cursor: Option<&IngestionCursor>,
+) -> Result<Option<IngestionBatch>, ExternalError> {
+    let metadata = tokio::fs::metadata(&source.path).await?;
+    let source_id = external_source_id(source);
+    let fingerprint = metadata_fingerprint(&source.path, &metadata);
+    if prior_cursor.is_some_and(|cursor| cursor.source_generation == fingerprint) {
+        return Ok(None);
     }
     let bytes = tokio::fs::read(&source.path).await?;
     let stable_generation = stable_generation(&source.path);
@@ -170,23 +202,19 @@ pub async fn ingest_external(
             imported_at: imported_at.to_owned(),
         })
         .collect();
-    let batch = IngestionBatch {
+    let next_sequence = u64::try_from(events.len()).unwrap_or(u64::MAX);
+    Ok(Some(IngestionBatch {
         raw_objects,
-        events: events.clone(),
+        events,
         cursor: IngestionCursor {
             source_id,
             source_generation: fingerprint,
             byte_offset: metadata.len(),
-            next_sequence: u64::try_from(events.len()).unwrap_or(u64::MAX),
+            next_sequence,
             partial_line: Vec::new(),
             updated_at: imported_at.to_owned(),
         },
-    };
-    storage.commit_batch(&batch).await?;
-    Ok(ExternalImport {
-        changed: true,
-        events,
-    })
+    }))
 }
 
 #[derive(Clone, Debug)]

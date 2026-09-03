@@ -79,9 +79,13 @@ The Compose service mounts `SESSIONMESH_AGENT_HOME` read-only at
 `/sources/home` and sets container-local `CODEX_HOME=/sources/home/.codex`. The
 daemon repeatedly performs read-only discovery and cursor-based incremental
 scans at `SESSIONMESH_WATCH_DEBOUNCE_MS`. Only complete records commit; each
-new canonical event is then published to SSE clients. This makes synchronization
-automatic for the coding agent without modifying or requiring participation
-from the native tool.
+new canonical event is then published to SSE clients. Cross-tool correlation
+and handoff regeneration run separately, at the slower
+`SESSIONMESH_RECONCILE_INTERVAL_MS` cadence, and only when a scan found new
+data since the last pass — this keeps the expensive, history-sized
+reconciliation work decoupled from the cheap, frequent file-scanning work.
+This makes synchronization automatic for the coding agent without modifying
+or requiring participation from the native tool.
 
 Private agent stores commonly use mode `0700`. Set `SESSIONMESH_RUN_UID` and
 `SESSIONMESH_RUN_GID` to the numeric owner of the mounted home so the non-root
@@ -103,6 +107,88 @@ The resulting URL is `http://192.168.155.225:8787`. Data APIs remain protected
 by the generated bearer token, but the Web UI and health endpoint are reachable
 by hosts that can access that interface. Network firewall policy must restrict
 the port to the trusted LAN; SessionMesh does not add a host firewall rule.
+
+## Multi-host collector setup
+
+Everything above assumes SessionMesh can read a native tool's session files
+directly, through a local bind mount. That assumption breaks for agentic
+tools running on dedicated systems reachable only over the network — there is
+no filesystem to mount. For that case, a stateless `sessionmesh-collector`
+process runs on the dedicated system instead, reusing the daemon's own
+discovery and parsing code, and pushes newly observed data to the daemon's
+network ingestion API instead of writing to a local database:
+
+```mermaid
+flowchart LR
+    subgraph dedicated["Dedicated system (network-only)"]
+        toolstore["Native tool store"]
+        collector["sessionmesh-collector<br/>stateless"]
+    end
+    subgraph host["SessionMesh host"]
+        ingest["Ingestion listener<br/>TLS · ingest_bind_address:ingest_port"]
+        api["Local API/MCP<br/>127.0.0.1"]
+        db["SessionMesh database"]
+    end
+    toolstore --> collector
+    collector -- "HTTPS, per-collector token" --> ingest
+    ingest --> db
+    api --> db
+```
+
+This is a distinct trust boundary from everything else on this page: every
+mount and listener described above serves *this host's own* data on
+loopback (or an explicitly published LAN interface); the ingestion listener
+instead accepts *inbound* data pushed by a previously unrelated process, so
+it is hardened accordingly — its own TLS-terminated listener and port,
+per-collector bearer tokens (never the local UI/MCP token), server-side
+re-verification of every event ID and raw object's content hash (a
+collector cannot forge either), per-collector rate limiting, and an audit
+log of every accepted and rejected attempt. See
+[Configuration](../development/configuration.md#network-ingestion-remote-collectors)
+for the full field reference.
+
+### Setup
+
+1. Provision a TLS certificate and key for the daemon's ingestion listener
+   (a certificate from your internal CA, or any certificate the collector's
+   host will trust) and set `network_ingestion_enabled = true`,
+   `allow_network = true`, `ingest_tls_cert_path`, and `ingest_tls_key_path`
+   in the daemon's configuration.
+2. Issue a collector token on the SessionMesh host:
+
+   ```bash
+   sessionmesh collector issue "dedicated-host-1"
+   ```
+
+   The raw token is shown exactly once. Copy it immediately — SessionMesh
+   never stores or redisplays it.
+3. On the dedicated system, run the `sessionmesh-collector` binary with:
+
+   ```dotenv
+   SESSIONMESH_COLLECTOR_ENDPOINT=https://sessionmesh.internal:8788
+   SESSIONMESH_COLLECTOR_TOKEN=<the token from step 2>
+   HOME=/home/agent-user
+   ```
+
+   It discovers and scans the same native tool stores the daemon would scan
+   locally (Codex, Claude Code, Continue, Agy, OpenCode), under `HOME` (or
+   `SESSIONMESH_PROFILE_ROOT`/`CODEX_HOME` when those differ), and holds no
+   local state: it asks the daemon for each source's last committed cursor
+   before every scan, so a restarted or reprovisioned collector always
+   resumes from where the daemon last confirmed receipt.
+4. To decommission a collector, revoke it on the SessionMesh host:
+
+   ```bash
+   sessionmesh collector revoke <collector-id>
+   ```
+
+   `sessionmesh collector list` shows every registered collector and its
+   status.
+
+Cross-tool correlation accounts for this topology: two sessions are only
+treated as the same physical workspace when they share both a `cwd` and an
+origin (both local, or the same collector) — a coincidentally identical path
+reported by two different hosts is never merged into one workspace.
 
 ## Example contract
 
@@ -144,4 +230,7 @@ as a temporary bootstrap server.
 - Root containers are not a supported default.
 - Secrets enter the container only through explicit configuration mechanisms.
 - Remote network binding and remote model access remain opt-in.
+- Network ingestion for remote collectors is opt-in, TLS-only, and
+  authenticated per collector with a revocable token distinct from the
+  local UI/MCP token; it is never served on the local API's listener.
 - Backup and restore operate on SessionMesh state, never on native tool stores.

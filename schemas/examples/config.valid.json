@@ -5,7 +5,8 @@
   "allow_network": false,
   "database_path": "/var/lib/sessionmesh/sessionmesh.db",
   "blob_store_path": "/var/lib/sessionmesh/blobs",
-  "watch_debounce_ms": 750,
+  "watch_debounce_ms": 2000,
+  "reconcile_interval_ms": 30000,
   "redaction_enabled": true,
   "llm_endpoint": "http://127.0.0.1:11434/v1",
   "model": "local-extractor",
@@ -16,5 +17,11 @@
       "readable_path": "/sources/codex",
       "original_path": "~/.codex"
     }
-  ]
+  ],
+  "network_ingestion_enabled": false,
+  "ingest_bind_address": "0.0.0.0",
+  "ingest_port": 8788,
+  "ingest_max_batch_bytes": 10485760,
+  "ingest_max_events_per_batch": 5000,
+  "ingest_rate_limit_per_minute": 60
 }

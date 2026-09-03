@@ -5,8 +5,42 @@ changes to SessionMesh are recorded here.
 
 ## Unreleased
 
+### Changed
+
+- Decoupled the daemon's cheap file discovery/incremental-ingest scan from
+  the expensive cross-tool correlation and handoff reconciliation pass; the
+  latter now runs on its own, independently configurable interval
+  (`reconcile_interval_ms` / `SESSIONMESH_RECONCILE_INTERVAL_MS`, default
+  30s) and only fires when a scan found new data, instead of re-running on
+  every ~1s tick regardless of how much session history has accumulated.
+- Handoff regeneration now loads only the canonical events belonging to the
+  affected global session (via a new indexed, session-filtered storage
+  query) instead of reloading the entire event history on every refresh.
+- Raised the default file discovery/incremental-ingest interval
+  (`watch_debounce_ms`) from 750ms to 2s as an additional, immediately
+  effective reduction in idle polling overhead.
+
 ### Added
 
+- Network ingestion for remote collectors: a TLS-terminated, per-collector
+  bearer-token-authenticated batch-ingestion API (`network_ingestion_enabled`,
+  separate listener from the local API), a stateless `sessionmesh-collector`
+  binary that reuses the daemon's own discovery/parsing code and pushes
+  batches instead of committing locally, a shared `sessionmesh-ingest-wire`
+  protocol crate, server-side re-verification of every event ID and raw
+  object identity (a collector cannot forge either), per-collector rate
+  limiting, and an ingestion audit log recording every accepted and rejected
+  attempt. Collector tokens are issued, listed, and revoked with the new
+  `sessionmesh collector issue|list|revoke` CLI, which operates on the
+  daemon's own database and never stores or redisplays a raw token after
+  issuance. The daemon serves it on its own TLS listener
+  (`ingest_bind_address:ingest_port`), running concurrently with the local
+  API via `tokio::try_join!` so a bind failure on either surfaces
+  immediately instead of failing silently in the background. Cross-tool
+  correlation now also requires a matching origin collector (or both local)
+  before treating two sessions' identical `cwd` as the same physical
+  workspace, so two unrelated hosts checking out a repository under the
+  same path are never merged.
 - Beginner-oriented setup and usage guide covering service checks, connector
   installation, Web UI authentication, native resume, cross-tool rate-limit
   handoff, correlation review, manual fallback, and troubleshooting.

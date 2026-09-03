@@ -12,9 +12,14 @@ use serde::Deserialize;
 use url::Url;
 
 const DEFAULT_PORT: u16 = 8787;
-const DEFAULT_DEBOUNCE_MS: u64 = 750;
+const DEFAULT_DEBOUNCE_MS: u64 = 2_000;
+const DEFAULT_RECONCILE_INTERVAL_MS: u64 = 30_000;
 const DEFAULT_TOKEN_BUDGET: u32 = 4_000;
 const DEFAULT_CORRELATION_THRESHOLD: f64 = 0.8;
+const DEFAULT_INGEST_PORT: u16 = 8788;
+const DEFAULT_INGEST_MAX_BATCH_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_INGEST_MAX_EVENTS_PER_BATCH: usize = 5_000;
+const DEFAULT_INGEST_RATE_LIMIT_PER_MINUTE: u32 = 60;
 
 /// Identifies the layer that supplied an effective configuration value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,8 +80,14 @@ pub struct AppConfig {
     pub database_path: Resolved<PathBuf>,
     /// Content-addressed blob-store location.
     pub blob_store_path: Resolved<PathBuf>,
-    /// Filesystem watcher debounce duration in milliseconds.
+    /// Filesystem discovery and incremental-ingest scan interval in milliseconds.
     pub watch_debounce_ms: Resolved<u64>,
+    /// Correlation-and-handoff reconciliation interval in milliseconds.
+    ///
+    /// Decoupled from `watch_debounce_ms` because reconciliation cost grows
+    /// with total session history, while discovery and incremental ingest
+    /// stay cheap and can run far more often.
+    pub reconcile_interval_ms: Resolved<u64>,
     /// Whether secret redaction is enabled before derived processing.
     pub redaction_enabled: Resolved<bool>,
     /// Optional OpenAI-compatible embedding endpoint.
@@ -91,6 +102,31 @@ pub struct AppConfig {
     pub correlation_threshold: Resolved<f64>,
     /// Explicit container-readable to host-origin path mappings.
     pub source_mappings: Resolved<Vec<SourceMapping>>,
+    /// Whether the network ingestion API for remote collectors is served.
+    ///
+    /// A distinct trust boundary from the rest of this configuration: every
+    /// other setting governs the loopback-reachable local API or outbound
+    /// model calls, while this accepts inbound data from previously
+    /// unrelated processes. Requires `allow_network = true` and both TLS
+    /// paths below.
+    pub network_ingestion_enabled: Resolved<bool>,
+    /// Bind address for the network ingestion listener.
+    pub ingest_bind_address: Resolved<IpAddr>,
+    /// Port for the network ingestion listener.
+    pub ingest_port: Resolved<u16>,
+    /// PEM certificate chain path for the network ingestion listener.
+    /// Required when `network_ingestion_enabled = true`.
+    pub ingest_tls_cert_path: Resolved<Option<PathBuf>>,
+    /// PEM private key path for the network ingestion listener. Required
+    /// when `network_ingestion_enabled = true`.
+    pub ingest_tls_key_path: Resolved<Option<PathBuf>>,
+    /// Maximum accepted wire size of one ingestion batch, in bytes.
+    pub ingest_max_batch_bytes: Resolved<u64>,
+    /// Maximum accepted canonical events in one ingestion batch.
+    pub ingest_max_events_per_batch: Resolved<usize>,
+    /// Maximum accepted ingestion requests per minute, per collector. `0`
+    /// disables rate limiting.
+    pub ingest_rate_limit_per_minute: Resolved<u32>,
 }
 
 /// Maps a readable runtime path to the original host path retained in provenance.
@@ -121,6 +157,8 @@ pub struct ConfigLayer {
     pub blob_store_path: Option<PathBuf>,
     /// Watch debounce in milliseconds.
     pub watch_debounce_ms: Option<u64>,
+    /// Reconciliation interval in milliseconds.
+    pub reconcile_interval_ms: Option<u64>,
     /// Secret-redaction toggle.
     pub redaction_enabled: Option<bool>,
     /// Embedding endpoint URL.
@@ -135,6 +173,22 @@ pub struct ConfigLayer {
     pub correlation_threshold: Option<f64>,
     /// Runtime-to-origin source mappings.
     pub source_mappings: Option<Vec<SourceMapping>>,
+    /// Whether to serve the network ingestion API for remote collectors.
+    pub network_ingestion_enabled: Option<bool>,
+    /// Network ingestion listener bind address.
+    pub ingest_bind_address: Option<IpAddr>,
+    /// Network ingestion listener port.
+    pub ingest_port: Option<u16>,
+    /// Network ingestion listener PEM certificate chain path.
+    pub ingest_tls_cert_path: Option<PathBuf>,
+    /// Network ingestion listener PEM private key path.
+    pub ingest_tls_key_path: Option<PathBuf>,
+    /// Maximum accepted ingestion batch size, in bytes.
+    pub ingest_max_batch_bytes: Option<u64>,
+    /// Maximum accepted canonical events in one ingestion batch.
+    pub ingest_max_events_per_batch: Option<usize>,
+    /// Maximum accepted ingestion requests per minute, per collector.
+    pub ingest_rate_limit_per_minute: Option<u32>,
 }
 
 /// Inputs used to resolve configuration without reading ambient process state.
@@ -241,6 +295,7 @@ struct RawConfig {
     database_path: Resolved<Option<PathBuf>>,
     blob_store_path: Resolved<Option<PathBuf>>,
     watch_debounce_ms: Resolved<u64>,
+    reconcile_interval_ms: Resolved<u64>,
     redaction_enabled: Resolved<bool>,
     embedding_endpoint: Resolved<Option<String>>,
     llm_endpoint: Resolved<Option<String>>,
@@ -248,6 +303,14 @@ struct RawConfig {
     token_budget: Resolved<u32>,
     correlation_threshold: Resolved<f64>,
     source_mappings: Resolved<Vec<SourceMapping>>,
+    network_ingestion_enabled: Resolved<bool>,
+    ingest_bind_address: Resolved<IpAddr>,
+    ingest_port: Resolved<u16>,
+    ingest_tls_cert_path: Resolved<Option<PathBuf>>,
+    ingest_tls_key_path: Resolved<Option<PathBuf>>,
+    ingest_max_batch_bytes: Resolved<u64>,
+    ingest_max_events_per_batch: Resolved<usize>,
+    ingest_rate_limit_per_minute: Resolved<u32>,
 }
 
 impl RawConfig {
@@ -260,6 +323,10 @@ impl RawConfig {
             database_path: Resolved::new(None, ConfigSource::Default),
             blob_store_path: Resolved::new(None, ConfigSource::Default),
             watch_debounce_ms: Resolved::new(DEFAULT_DEBOUNCE_MS, ConfigSource::Default),
+            reconcile_interval_ms: Resolved::new(
+                DEFAULT_RECONCILE_INTERVAL_MS,
+                ConfigSource::Default,
+            ),
             redaction_enabled: Resolved::new(true, ConfigSource::Default),
             embedding_endpoint: Resolved::new(None, ConfigSource::Default),
             llm_endpoint: Resolved::new(None, ConfigSource::Default),
@@ -270,6 +337,30 @@ impl RawConfig {
                 ConfigSource::Default,
             ),
             source_mappings: Resolved::new(Vec::new(), ConfigSource::Default),
+            network_ingestion_enabled: Resolved::new(false, ConfigSource::Default),
+            // Unlike `bind_address`, this defaults to unspecified rather
+            // than loopback: the feature it serves is meaningless without
+            // remote reachability, and turning it on at all already
+            // requires an explicit `allow_network = true` opt-in below.
+            ingest_bind_address: Resolved::new(
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                ConfigSource::Default,
+            ),
+            ingest_port: Resolved::new(DEFAULT_INGEST_PORT, ConfigSource::Default),
+            ingest_tls_cert_path: Resolved::new(None, ConfigSource::Default),
+            ingest_tls_key_path: Resolved::new(None, ConfigSource::Default),
+            ingest_max_batch_bytes: Resolved::new(
+                DEFAULT_INGEST_MAX_BATCH_BYTES,
+                ConfigSource::Default,
+            ),
+            ingest_max_events_per_batch: Resolved::new(
+                DEFAULT_INGEST_MAX_EVENTS_PER_BATCH,
+                ConfigSource::Default,
+            ),
+            ingest_rate_limit_per_minute: Resolved::new(
+                DEFAULT_INGEST_RATE_LIMIT_PER_MINUTE,
+                ConfigSource::Default,
+            ),
         }
     }
 
@@ -284,6 +375,8 @@ impl RawConfig {
             .replace_present(layer.blob_store_path, source);
         self.watch_debounce_ms
             .replace(layer.watch_debounce_ms, source);
+        self.reconcile_interval_ms
+            .replace(layer.reconcile_interval_ms, source);
         self.redaction_enabled
             .replace(layer.redaction_enabled, source);
         self.embedding_endpoint
@@ -295,8 +388,27 @@ impl RawConfig {
         self.correlation_threshold
             .replace(layer.correlation_threshold, source);
         self.source_mappings.replace(layer.source_mappings, source);
+        self.network_ingestion_enabled
+            .replace(layer.network_ingestion_enabled, source);
+        self.ingest_bind_address
+            .replace(layer.ingest_bind_address, source);
+        self.ingest_port.replace(layer.ingest_port, source);
+        self.ingest_tls_cert_path
+            .replace_present(layer.ingest_tls_cert_path, source);
+        self.ingest_tls_key_path
+            .replace_present(layer.ingest_tls_key_path, source);
+        self.ingest_max_batch_bytes
+            .replace(layer.ingest_max_batch_bytes, source);
+        self.ingest_max_events_per_batch
+            .replace(layer.ingest_max_events_per_batch, source);
+        self.ingest_rate_limit_per_minute
+            .replace(layer.ingest_rate_limit_per_minute, source);
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keeps every field's path resolution and cross-field validation in one auditable, linearly-readable boundary"
+    )]
     fn finish(
         self,
         user_home: &Path,
@@ -319,6 +431,18 @@ impl RawConfig {
         )?;
         let source_mappings =
             resolve_source_mappings(self.source_mappings, user_home, environment)?;
+        let ingest_tls_cert_path = resolve_truly_optional_path(
+            self.ingest_tls_cert_path,
+            "ingest_tls_cert_path",
+            user_home,
+            environment,
+        )?;
+        let ingest_tls_key_path = resolve_truly_optional_path(
+            self.ingest_tls_key_path,
+            "ingest_tls_key_path",
+            user_home,
+            environment,
+        )?;
 
         if !self.bind_address.value.is_loopback() && !self.allow_network.value {
             return Err(ConfigError::new(
@@ -339,6 +463,13 @@ impl RawConfig {
                 "watch_debounce_ms",
                 self.watch_debounce_ms.source,
                 "must not exceed 60000",
+            ));
+        }
+        if self.reconcile_interval_ms.value == 0 || self.reconcile_interval_ms.value > 600_000 {
+            return Err(ConfigError::new(
+                "reconcile_interval_ms",
+                self.reconcile_interval_ms.source,
+                "must be between 1 and 600000",
             ));
         }
         if self.token_budget.value == 0 {
@@ -362,6 +493,43 @@ impl RawConfig {
                 "must be between 0 and 1",
             ));
         }
+        if self.network_ingestion_enabled.value && !self.allow_network.value {
+            return Err(ConfigError::new(
+                "network_ingestion_enabled",
+                self.network_ingestion_enabled.source,
+                "requires allow_network = true",
+            ));
+        }
+        if self.network_ingestion_enabled.value
+            && (ingest_tls_cert_path.value.is_none() || ingest_tls_key_path.value.is_none())
+        {
+            return Err(ConfigError::new(
+                "network_ingestion_enabled",
+                self.network_ingestion_enabled.source,
+                "requires both ingest_tls_cert_path and ingest_tls_key_path",
+            ));
+        }
+        if self.ingest_port.value == 0 {
+            return Err(ConfigError::new(
+                "ingest_port",
+                self.ingest_port.source,
+                "must be greater than zero",
+            ));
+        }
+        if self.ingest_max_batch_bytes.value == 0 {
+            return Err(ConfigError::new(
+                "ingest_max_batch_bytes",
+                self.ingest_max_batch_bytes.source,
+                "must be greater than zero",
+            ));
+        }
+        if self.ingest_max_events_per_batch.value == 0 {
+            return Err(ConfigError::new(
+                "ingest_max_events_per_batch",
+                self.ingest_max_events_per_batch.source,
+                "must be greater than zero",
+            ));
+        }
 
         let embedding_endpoint = resolve_endpoint(
             self.embedding_endpoint,
@@ -379,6 +547,7 @@ impl RawConfig {
             database_path,
             blob_store_path,
             watch_debounce_ms: self.watch_debounce_ms,
+            reconcile_interval_ms: self.reconcile_interval_ms,
             redaction_enabled: self.redaction_enabled,
             embedding_endpoint,
             llm_endpoint,
@@ -386,6 +555,14 @@ impl RawConfig {
             token_budget: self.token_budget,
             correlation_threshold: self.correlation_threshold,
             source_mappings,
+            network_ingestion_enabled: self.network_ingestion_enabled,
+            ingest_bind_address: self.ingest_bind_address,
+            ingest_port: self.ingest_port,
+            ingest_tls_cert_path,
+            ingest_tls_key_path,
+            ingest_max_batch_bytes: self.ingest_max_batch_bytes,
+            ingest_max_events_per_batch: self.ingest_max_events_per_batch,
+            ingest_rate_limit_per_minute: self.ingest_rate_limit_per_minute,
         })
     }
 }
@@ -403,6 +580,7 @@ fn environment_layer(environment: &BTreeMap<String, String>) -> Result<ConfigLay
             .get("SESSIONMESH_BLOB_STORE_PATH")
             .map(PathBuf::from),
         watch_debounce_ms: parse_environment(environment, "SESSIONMESH_WATCH_DEBOUNCE_MS")?,
+        reconcile_interval_ms: parse_environment(environment, "SESSIONMESH_RECONCILE_INTERVAL_MS")?,
         redaction_enabled: parse_environment(environment, "SESSIONMESH_REDACTION_ENABLED")?,
         embedding_endpoint: environment.get("SESSIONMESH_EMBEDDING_ENDPOINT").cloned(),
         llm_endpoint: environment.get("SESSIONMESH_LLM_ENDPOINT").cloned(),
@@ -410,6 +588,30 @@ fn environment_layer(environment: &BTreeMap<String, String>) -> Result<ConfigLay
         token_budget: parse_environment(environment, "SESSIONMESH_TOKEN_BUDGET")?,
         correlation_threshold: parse_environment(environment, "SESSIONMESH_CORRELATION_THRESHOLD")?,
         source_mappings: None,
+        network_ingestion_enabled: parse_environment(
+            environment,
+            "SESSIONMESH_NETWORK_INGESTION_ENABLED",
+        )?,
+        ingest_bind_address: parse_environment(environment, "SESSIONMESH_INGEST_BIND_ADDRESS")?,
+        ingest_port: parse_environment(environment, "SESSIONMESH_INGEST_PORT")?,
+        ingest_tls_cert_path: environment
+            .get("SESSIONMESH_INGEST_TLS_CERT_PATH")
+            .map(PathBuf::from),
+        ingest_tls_key_path: environment
+            .get("SESSIONMESH_INGEST_TLS_KEY_PATH")
+            .map(PathBuf::from),
+        ingest_max_batch_bytes: parse_environment(
+            environment,
+            "SESSIONMESH_INGEST_MAX_BATCH_BYTES",
+        )?,
+        ingest_max_events_per_batch: parse_environment(
+            environment,
+            "SESSIONMESH_INGEST_MAX_EVENTS_PER_BATCH",
+        )?,
+        ingest_rate_limit_per_minute: parse_environment(
+            environment,
+            "SESSIONMESH_INGEST_RATE_LIMIT_PER_MINUTE",
+        )?,
     })
 }
 
@@ -457,6 +659,26 @@ fn resolve_optional_path(
         .value
         .map_or((default, ConfigSource::Default), |path| (path, raw.source));
     resolve_path(Resolved::new(path, source), field, user_home, environment)
+}
+
+/// Like [`resolve_optional_path`], but for fields with no sensible default
+/// at all (e.g. TLS material): stays `None` unless a layer supplied a path.
+fn resolve_truly_optional_path(
+    raw: Resolved<Option<PathBuf>>,
+    field: &str,
+    user_home: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<Resolved<Option<PathBuf>>, ConfigError> {
+    let Some(path) = raw.value else {
+        return Ok(Resolved::new(None, raw.source));
+    };
+    let resolved = resolve_path(
+        Resolved::new(path, raw.source),
+        field,
+        user_home,
+        environment,
+    )?;
+    Ok(Resolved::new(Some(resolved.value), resolved.source))
 }
 
 fn resolve_source_mappings(
@@ -842,6 +1064,82 @@ mod tests {
 
         assert_eq!(error.field, "llm_endpoint");
         assert_eq!(error.source, ConfigSource::Cli);
+    }
+
+    #[test]
+    fn network_ingestion_is_disabled_by_default_on_its_own_listener() {
+        let environment = BTreeMap::new();
+        let config = resolve(inputs(
+            Path::new("/isolated/home"),
+            None,
+            &environment,
+            ConfigLayer::default(),
+        ))
+        .expect("secure defaults should resolve");
+
+        assert!(!config.network_ingestion_enabled.value);
+        assert_eq!(config.ingest_port.value, DEFAULT_INGEST_PORT);
+        assert_eq!(config.ingest_tls_cert_path.value, None);
+        assert_eq!(config.ingest_tls_key_path.value, None);
+    }
+
+    #[test]
+    fn network_ingestion_requires_allow_network() {
+        let environment = BTreeMap::new();
+        let cli = ConfigLayer {
+            network_ingestion_enabled: Some(true),
+            ingest_tls_cert_path: Some(PathBuf::from("/etc/sessionmesh/cert.pem")),
+            ingest_tls_key_path: Some(PathBuf::from("/etc/sessionmesh/key.pem")),
+            ..ConfigLayer::default()
+        };
+
+        let error = resolve(inputs(Path::new("/isolated/home"), None, &environment, cli))
+            .expect_err("network ingestion requires explicit network opt-in");
+
+        assert_eq!(error.field, "network_ingestion_enabled");
+        assert_eq!(error.source, ConfigSource::Cli);
+    }
+
+    #[test]
+    fn network_ingestion_requires_both_tls_paths() {
+        let environment = BTreeMap::new();
+        let cli = ConfigLayer {
+            network_ingestion_enabled: Some(true),
+            allow_network: Some(true),
+            ingest_tls_cert_path: Some(PathBuf::from("/etc/sessionmesh/cert.pem")),
+            ..ConfigLayer::default()
+        };
+
+        let error = resolve(inputs(Path::new("/isolated/home"), None, &environment, cli))
+            .expect_err("network ingestion requires a cert and a key path");
+
+        assert_eq!(error.field, "network_ingestion_enabled");
+        assert_eq!(error.source, ConfigSource::Cli);
+    }
+
+    #[test]
+    fn network_ingestion_resolves_with_network_opt_in_and_tls_material() {
+        let environment = BTreeMap::new();
+        let cli = ConfigLayer {
+            network_ingestion_enabled: Some(true),
+            allow_network: Some(true),
+            ingest_tls_cert_path: Some(PathBuf::from("~/certs/cert.pem")),
+            ingest_tls_key_path: Some(PathBuf::from("~/certs/key.pem")),
+            ..ConfigLayer::default()
+        };
+
+        let config = resolve(inputs(Path::new("/isolated/home"), None, &environment, cli))
+            .expect("a fully configured network ingestion listener should resolve");
+
+        assert!(config.network_ingestion_enabled.value);
+        assert_eq!(
+            config.ingest_tls_cert_path.value,
+            Some(PathBuf::from("/isolated/home/certs/cert.pem"))
+        );
+        assert_eq!(
+            config.ingest_tls_key_path.value,
+            Some(PathBuf::from("/isolated/home/certs/key.pem"))
+        );
     }
 
     #[test]
