@@ -115,6 +115,18 @@ pub async fn prepare_opencode(
         .immutable(true)
         .create_if_missing(false);
     let mut connection = SqliteConnection::connect_with(&options).await?;
+    // Sessions are the unit of replay: a session with any part updated at or
+    // after the previous high-water mark is reread whole, because event
+    // sequences are ranks within the session. Replays are idempotent. A
+    // database whose newest part predates the mark was replaced or restored,
+    // so it is reread from the beginning.
+    let newest_update: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(time_updated), 0) FROM part")
+        .fetch_one(&mut connection)
+        .await?;
+    let watermark = prior_cursor
+        .map(|cursor| i64::try_from(cursor.byte_offset).unwrap_or(0))
+        .filter(|mark| *mark <= newest_update)
+        .unwrap_or(0);
     let rows = sqlx::query(
         "SELECT p.id AS part_id, p.session_id, p.time_created,
                 s.directory, s.title AS thread_title,
@@ -124,8 +136,12 @@ pub async fn prepare_opencode(
          JOIN session s ON s.id = p.session_id
          WHERE json_extract(p.data, '$.type') = 'text'
            AND json_type(p.data, '$.text') = 'text'
+           AND p.session_id IN (
+               SELECT DISTINCT session_id FROM part WHERE time_updated >= ?
+           )
          ORDER BY p.session_id, p.time_created, p.id",
     )
+    .bind(watermark)
     .fetch_all(&mut connection)
     .await?;
     connection.close().await?;
@@ -233,7 +249,8 @@ pub async fn prepare_opencode(
         cursor: IngestionCursor {
             source_id,
             source_generation: fingerprint,
-            byte_offset: metadata.len(),
+            // High-water mark of `part.time_updated`, not a file offset.
+            byte_offset: u64::try_from(newest_update).unwrap_or(0),
             next_sequence,
             partial_line: Vec::new(),
             updated_at: imported_at.to_owned(),
@@ -373,11 +390,11 @@ mod tests {
         for statement in [
             "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL, title TEXT NOT NULL)",
             "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL)",
-            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL)",
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)",
             "CREATE TABLE credential (unexpected_secret_shape BLOB)",
             "INSERT INTO session VALUES ('s1', '/workspace/repo', 'Implement OpenCode import')",
             "INSERT INTO message VALUES ('m1', 's1', '{\"role\":\"user\"}')",
-            "INSERT INTO part VALUES ('p1', 'm1', 's1', 1784678400000, '{\"type\":\"text\",\"text\":\"Build shared context\"}')",
+            "INSERT INTO part VALUES ('p1', 'm1', 's1', 1784678400000, 1784678400000, '{\"type\":\"text\",\"text\":\"Build shared context\"}')",
         ] {
             sqlx::query(statement)
                 .execute(&mut connection)
@@ -413,5 +430,72 @@ mod tests {
             first.events[0].workspace.as_ref().unwrap().cwd.as_deref(),
             Some("/workspace/repo")
         );
+    }
+
+    #[tokio::test]
+    async fn rescan_reads_only_sessions_with_updated_parts() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("opencode.db");
+        let options = SqliteConnectOptions::new()
+            .filename(&database)
+            .create_if_missing(true);
+        let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+        for statement in [
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL, title TEXT NOT NULL)",
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL)",
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)",
+            "INSERT INTO session VALUES ('s1', '/repo/one', 'One'), ('s2', '/repo/two', 'Two')",
+            "INSERT INTO message VALUES ('m1', 's1', '{\"role\":\"user\"}'), ('m2', 's2', '{\"role\":\"user\"}')",
+            "INSERT INTO part VALUES ('p1', 'm1', 's1', 1784678400000, 1784678400000, '{\"type\":\"text\",\"text\":\"first session\"}')",
+            "INSERT INTO part VALUES ('p2', 'm2', 's2', 1784678500000, 1784678500000, '{\"type\":\"text\",\"text\":\"second session\"}')",
+        ] {
+            sqlx::query(statement)
+                .execute(&mut connection)
+                .await
+                .unwrap();
+        }
+        let storage = Storage::open(
+            directory.path().join("sessionmesh.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .unwrap();
+        let source = OpenCodeSource {
+            path: database,
+            original_path: PathBuf::from("~/.local/share/opencode/opencode.db"),
+        };
+        let first = ingest_opencode(&storage, &source, "2026-07-22T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(first.events.len(), 2);
+
+        sqlx::query("INSERT INTO message VALUES ('m3', 's2', '{\"role\":\"assistant\"}')")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO part VALUES ('p3', 'm3', 's2', 1784678600000, 1784678600000, '{\"type\":\"text\",\"text\":\"reply\"}')")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        let second = ingest_opencode(&storage, &source, "2026-07-22T00:01:00Z")
+            .await
+            .unwrap();
+
+        assert!(second.changed);
+        assert!(
+            second
+                .events
+                .iter()
+                .all(|event| event.native_session_id == "opencode:s2"),
+            "unchanged sessions must not be reread"
+        );
+        assert_eq!(
+            second.events.len(),
+            2,
+            "session s2 is replayed with its new part"
+        );
+        let events = storage.list_canonical_events().await.unwrap();
+        assert_eq!(events.len(), 3);
     }
 }

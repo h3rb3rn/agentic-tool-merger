@@ -151,11 +151,10 @@ async fn bind_ingest_server(
 /// intervals.
 ///
 /// Discovery and incremental ingest are cheap (bounded directory reads and
-/// offset-based file reads) and can run frequently. Reconciliation cost
-/// grows with the total accumulated session history (it reloads and
-/// re-scores session summaries), so it runs on its own, much slower
-/// interval and only when discovery/ingest actually produced new data since
-/// the last reconciliation pass.
+/// offset-based file reads) and can run frequently. Reconciliation runs on its
+/// own, slower interval. It asks storage which sessions gained events since
+/// its last pass, so an idle tick costs one indexed `MAX(rowid)` lookup and
+/// remote-collector ingestion triggers it the same way as local scans.
 async fn run_ingestion(
     state: ApiState,
     discovery_input: CodexDiscoveryInput,
@@ -169,29 +168,59 @@ async fn run_ingestion(
         tokio::time::interval(std::time::Duration::from_millis(scan_interval_ms));
     let mut reconcile_interval =
         tokio::time::interval(std::time::Duration::from_millis(reconcile_interval_ms));
-    let mut dirty = false;
+    let mut reconciler = Reconciler::default();
+    let mut codex_memory = ScanMemory::default();
+    let mut external_memory = ScanMemory::default();
     loop {
         tokio::select! {
             _ = scan_interval.tick() => {
-                let mut changed = scan_codex_once(&state, &discovery_input).await;
+                scan_codex_once(&state, &discovery_input, &mut codex_memory).await;
                 let external_sources = external_sources(&profile_root, &original_profile_root);
                 let opencode_source = discover_opencode(&profile_root, &original_profile_root);
-                changed |= scan_external_once(&state, &external_sources).await;
-                changed |= scan_opencode_once(&state, opencode_source.as_ref()).await;
-                dirty |= changed;
+                scan_external_once(&state, &external_sources, &mut external_memory).await;
+                scan_opencode_once(&state, opencode_source.as_ref()).await;
             }
             _ = reconcile_interval.tick() => {
-                if dirty {
-                    dirty = false;
-                    let _ = reconcile_and_refresh(&state, correlation_threshold).await;
-                }
+                let _ = reconciler.reconcile(&state, correlation_threshold).await;
             }
         }
     }
 }
 
-async fn scan_codex_once(state: &ApiState, discovery_input: &CodexDiscoveryInput) -> bool {
-    let mut changed = false;
+/// Remembers each scanned file's size and modification time so unchanged
+/// files are skipped without a database cursor lookup or a file read.
+///
+/// The stamp is taken before ingestion and only remembered after it
+/// succeeds, so a write that races the read is picked up on the next tick and
+/// a failed ingest is retried. Memory is per process; a restart rescans every
+/// file once, and the persisted cursors keep that replay idempotent.
+#[derive(Default)]
+struct ScanMemory {
+    stamps: BTreeMap<PathBuf, FileStamp>,
+}
+
+type FileStamp = (u64, Option<std::time::SystemTime>);
+
+impl ScanMemory {
+    fn stamp(path: &Path) -> Option<FileStamp> {
+        let metadata = fs::metadata(path).ok()?;
+        Some((metadata.len(), metadata.modified().ok()))
+    }
+
+    fn is_unchanged(&self, path: &Path, stamp: &FileStamp) -> bool {
+        self.stamps.get(path) == Some(stamp)
+    }
+
+    fn remember(&mut self, path: &Path, stamp: FileStamp) {
+        self.stamps.insert(path.to_path_buf(), stamp);
+    }
+}
+
+async fn scan_codex_once(
+    state: &ApiState,
+    discovery_input: &CodexDiscoveryInput,
+    memory: &mut ScanMemory,
+) {
     let report = discover(discovery_input);
     for source in report
         .installations
@@ -199,6 +228,13 @@ async fn scan_codex_once(state: &ApiState, discovery_input: &CodexDiscoveryInput
         .flat_map(|installation| &installation.sources)
         .filter(|source| source.kind == CodexSourceKind::Rollout && source.readable)
     {
+        let stamp = ScanMemory::stamp(&source.readable_path);
+        if stamp
+            .as_ref()
+            .is_some_and(|stamp| memory.is_unchanged(&source.readable_path, stamp))
+        {
+            continue;
+        }
         let imported_at =
             chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339();
         let source_label = source.identity.to_string_lossy();
@@ -217,13 +253,14 @@ async fn scan_codex_once(state: &ApiState, discovery_input: &CodexDiscoveryInput
             imported_at,
         };
         if let Ok(prepared) = ingest_file(state.storage(), &input).await {
-            changed |= !prepared.batch.events.is_empty();
             for event in &prepared.batch.events {
                 state.publish(event);
             }
+            if let Some(stamp) = stamp {
+                memory.remember(&source.readable_path, stamp);
+            }
         }
     }
-    changed
 }
 
 fn external_sources(profile_root: &Path, original_root: &Path) -> Vec<ExternalSource> {
@@ -242,34 +279,40 @@ fn external_sources(profile_root: &Path, original_root: &Path) -> Vec<ExternalSo
     sources
 }
 
-async fn scan_opencode_once(state: &ApiState, source: Option<&OpenCodeSource>) -> bool {
+async fn scan_opencode_once(state: &ApiState, source: Option<&OpenCodeSource>) {
     let Some(source) = source else {
-        return false;
+        return;
     };
     let imported_at =
         chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339();
     let Ok(import) = ingest_opencode(state.storage(), source, &imported_at).await else {
-        return false;
+        return;
     };
     for event in &import.events {
         state.publish(event);
     }
-    import.changed
 }
 
-async fn scan_external_once(state: &ApiState, sources: &[ExternalSource]) -> bool {
-    let mut changed = false;
+async fn scan_external_once(state: &ApiState, sources: &[ExternalSource], memory: &mut ScanMemory) {
     for source in sources {
+        let stamp = ScanMemory::stamp(&source.path);
+        if stamp
+            .as_ref()
+            .is_some_and(|stamp| memory.is_unchanged(&source.path, stamp))
+        {
+            continue;
+        }
         let imported_at =
             chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339();
         if let Ok(import) = ingest_external(state.storage(), source, &imported_at).await {
-            changed |= import.changed;
             for event in &import.events {
                 state.publish(event);
             }
+            if let Some(stamp) = stamp {
+                memory.remember(&source.path, stamp);
+            }
         }
     }
-    changed
 }
 
 #[derive(Clone, Debug)]
@@ -289,61 +332,112 @@ struct SessionSummary {
     origin_collector_id: Option<String>,
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "reconciliation keeps candidate persistence, membership decisions, and handoff refresh in one auditable orchestration boundary"
-)]
-async fn reconcile_and_refresh(
-    state: &ApiState,
-    correlation_threshold: f64,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let summaries = session_summaries(state.storage()).await?;
-    let mut memberships = state.storage().list_all_session_members().await?;
-    let globals = state.storage().list_global_sessions().await?;
-    let mut touched = BTreeSet::new();
-    refresh_pending_candidate_evidence(state.storage(), &summaries).await?;
-    for summary in &summaries {
-        if memberships
-            .iter()
-            .any(|member| member.native_session_id == summary.id)
-        {
-            continue;
+/// Incremental correlation state carried across reconciliation passes.
+///
+/// Reconciliation cost is proportional to the sessions that gained events
+/// since the previous pass, not to the accumulated history: only those
+/// sessions are reloaded and re-summarized, and only their global sessions
+/// get a refreshed handoff. The first pass (the process just started) treats
+/// every session as changed so derived state is rebuilt from immutable events.
+#[derive(Default)]
+struct Reconciler {
+    /// Highest `native_events` rowid already reflected in `summaries`.
+    watermark: i64,
+    /// Compact per-session correlation inputs; event payloads are not kept.
+    summaries: BTreeMap<String, SessionSummary>,
+    bootstrapped: bool,
+}
+
+impl Reconciler {
+    /// Correlates changed sessions and refreshes the affected handoffs.
+    ///
+    /// Returns the global sessions whose handoff was regenerated, which is
+    /// empty when no session gained events. The watermark advances only after
+    /// the pass succeeds, so a failure is retried on the next interval.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "reconciliation keeps candidate persistence, membership decisions, and handoff refresh in one auditable orchestration boundary"
+    )]
+    async fn reconcile(
+        &mut self,
+        state: &ApiState,
+        correlation_threshold: f64,
+    ) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
+        let storage = state.storage();
+        let (changed_ids, next_watermark) = storage
+            .native_sessions_changed_since(self.watermark)
+            .await?;
+        if changed_ids.is_empty() && self.bootstrapped {
+            return Ok(Vec::new());
         }
-        let candidate = memberships
+        let changed = changed_ids.iter().cloned().collect::<BTreeSet<_>>();
+        for id in &changed_ids {
+            if let Some(summary) = load_session_summary(storage, id).await? {
+                self.summaries.insert(id.clone(), summary);
+            }
+        }
+
+        let mut memberships = storage.list_all_session_members().await?;
+        let mut member_global = memberships
             .iter()
-            .filter_map(|member| {
-                let other = summaries
-                    .iter()
-                    .find(|candidate| candidate.id == member.native_session_id)?;
-                (summary.tool_family != other.tool_family).then(|| {
-                    let evidence = correlation_evidence(summary, other);
-                    (member.global_session_id.clone(), other, evidence)
-                })
+            .map(|member| {
+                (
+                    member.native_session_id.clone(),
+                    member.global_session_id.clone(),
+                )
             })
-            .max_by(|left, right| {
-                left.2
-                    .score
-                    .partial_cmp(&right.2.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        let accepted = candidate
-            .as_ref()
-            .is_some_and(|(_, _, evidence)| evidence.score >= correlation_threshold);
-        if let Some((_, other, evidence)) = &candidate {
-            state
-                .storage()
-                .upsert_correlation_candidate(&StoredCorrelationCandidate {
-                    id: candidate_id(&summary.id, &other.id),
-                    left_native_session_id: summary.id.clone(),
-                    right_native_session_id: other.id.clone(),
-                    score: evidence.score,
-                    status: if accepted { "accepted" } else { "pending" }.to_owned(),
-                    evidence: evidence.details.clone(),
+            .collect::<BTreeMap<_, _>>();
+        refresh_pending_candidate_evidence(
+            storage,
+            &self.summaries,
+            (!self.bootstrapped).then_some(&changed),
+        )
+        .await?;
+
+        let mut pending = changed_ids
+            .iter()
+            .filter_map(|id| self.summaries.get(id))
+            .collect::<Vec<_>>();
+        pending.sort_by_key(|summary| summary.started_at);
+        let mut touched = BTreeSet::new();
+        for summary in pending {
+            if let Some(global_id) = member_global.get(&summary.id) {
+                touched.insert(global_id.clone());
+                continue;
+            }
+            let candidate = memberships
+                .iter()
+                .filter_map(|member| {
+                    let other = self.summaries.get(&member.native_session_id)?;
+                    (summary.tool_family != other.tool_family).then(|| {
+                        let evidence = correlation_evidence(summary, other);
+                        (member.global_session_id.clone(), other, evidence)
+                    })
                 })
-                .await?;
-        }
-        let (global_id, confidence, version, reason) =
-            if let Some((global_id, _, evidence)) = candidate.filter(|_| accepted) {
+                .max_by(|left, right| {
+                    left.2
+                        .score
+                        .partial_cmp(&right.2.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            let accepted = candidate
+                .as_ref()
+                .is_some_and(|(_, _, evidence)| evidence.score >= correlation_threshold);
+            if let Some((_, other, evidence)) = &candidate {
+                storage
+                    .upsert_correlation_candidate(&StoredCorrelationCandidate {
+                        id: candidate_id(&summary.id, &other.id),
+                        left_native_session_id: summary.id.clone(),
+                        right_native_session_id: other.id.clone(),
+                        score: evidence.score,
+                        status: if accepted { "accepted" } else { "pending" }.to_owned(),
+                        evidence: evidence.details.clone(),
+                    })
+                    .await?;
+            }
+            let (global_id, confidence, version, reason) = if let Some((global_id, _, evidence)) =
+                candidate.filter(|_| accepted)
+            {
                 (
                     global_id,
                     evidence.score,
@@ -353,8 +447,7 @@ async fn reconcile_and_refresh(
             } else {
                 let global_id = global_id(&summary.id);
                 let now = summary.started_at.to_rfc3339();
-                state
-                    .storage()
+                storage
                     .create_global_session(&StoredGlobalSession {
                         id: global_id.clone(),
                         objective: summary.objective.clone(),
@@ -369,73 +462,80 @@ async fn reconcile_and_refresh(
                     "no accepted cross-tool candidate; created isolated global session".to_owned(),
                 )
             };
-        let linked_at = summary.ended_at.to_rfc3339();
-        state
-            .storage()
-            .link_session(
-                &MembershipDecision {
-                    global_session_id: &global_id,
-                    native_session_id: &summary.id,
-                    actor: "automatic-correlator",
-                    reason: Some(&reason),
-                    created_at: &linked_at,
-                },
+            let linked_at = summary.ended_at.to_rfc3339();
+            storage
+                .link_session(
+                    &MembershipDecision {
+                        global_session_id: &global_id,
+                        native_session_id: &summary.id,
+                        actor: "automatic-correlator",
+                        reason: Some(&reason),
+                        created_at: &linked_at,
+                    },
+                    confidence,
+                    version,
+                )
+                .await?;
+            storage.touch_global_session(&global_id, &linked_at).await?;
+            member_global.insert(summary.id.clone(), global_id.clone());
+            memberships.push(sessionmesh_storage::StoredSessionMember {
+                global_session_id: global_id.clone(),
+                native_session_id: summary.id.clone(),
                 confidence,
-                version,
-            )
-            .await?;
-        state
-            .storage()
-            .touch_global_session(&global_id, &linked_at)
-            .await?;
-        memberships.push(sessionmesh_storage::StoredSessionMember {
-            global_session_id: global_id.clone(),
-            native_session_id: summary.id.clone(),
-            confidence,
-            correlation_version: version.to_owned(),
-            manual_state: Some("accepted".to_owned()),
-        });
-        touched.insert(global_id);
-    }
-    for global in globals {
-        if memberships
-            .iter()
-            .any(|member| member.global_session_id == global.id)
-        {
-            touched.insert(global.id);
+                correlation_version: version.to_owned(),
+                manual_state: Some("accepted".to_owned()),
+            });
+            touched.insert(global_id);
         }
+        if !self.bootstrapped {
+            // Rebuild every handoff once per process start; identical content
+            // is deduplicated by its content-addressed snapshot ID.
+            touched.extend(
+                memberships
+                    .iter()
+                    .map(|member| member.global_session_id.clone()),
+            );
+        }
+        let mut refreshed = Vec::with_capacity(touched.len());
+        for global_id in touched {
+            if state.refresh_global_handoff(&global_id).await.is_ok() {
+                refreshed.push(global_id);
+            }
+        }
+        self.watermark = next_watermark;
+        self.bootstrapped = true;
+        Ok(refreshed)
     }
-    for global_id in touched {
-        let _ = state.refresh_global_handoff(&global_id).await;
-    }
-    Ok(())
 }
 
-/// Recomputes review-only evidence when its explainability schema evolves.
+/// Recomputes review-only evidence when its explainability schema evolves or
+/// one of its sessions changed.
 ///
 /// Pending candidates are derived state and may be safely recalculated from
 /// immutable canonical events. Accepted and rejected candidates represent
 /// durable user decisions, so this refresh deliberately leaves them unchanged.
+/// With `scope`, only candidates touching those sessions are recomputed.
 async fn refresh_pending_candidate_evidence(
     storage: &Storage,
-    summaries: &[SessionSummary],
+    summaries: &BTreeMap<String, SessionSummary>,
+    scope: Option<&BTreeSet<String>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     for candidate in storage
         .list_correlation_candidates()
         .await?
         .into_iter()
         .filter(|candidate| candidate.status == "pending")
+        .filter(|candidate| {
+            scope.is_none_or(|scope| {
+                scope.contains(&candidate.left_native_session_id)
+                    || scope.contains(&candidate.right_native_session_id)
+            })
+        })
     {
-        let Some(left) = summaries
-            .iter()
-            .find(|summary| summary.id == candidate.left_native_session_id)
-        else {
-            continue;
-        };
-        let Some(right) = summaries
-            .iter()
-            .find(|summary| summary.id == candidate.right_native_session_id)
-        else {
+        let (Some(left), Some(right)) = (
+            summaries.get(&candidate.left_native_session_id),
+            summaries.get(&candidate.right_native_session_id),
+        ) else {
             continue;
         };
         let evidence = correlation_evidence(left, right);
@@ -453,84 +553,83 @@ async fn refresh_pending_candidate_evidence(
     Ok(())
 }
 
-async fn session_summaries(
+/// Loads one session's events and reduces them to its correlation summary.
+///
+/// Loading per session keeps peak memory proportional to the largest single
+/// session rather than the whole event history.
+async fn load_session_summary(
     storage: &Storage,
-) -> Result<Vec<SessionSummary>, Box<dyn Error + Send + Sync>> {
-    let origins: BTreeMap<String, Option<String>> = storage
-        .list_native_sessions()
+    id: &str,
+) -> Result<Option<SessionSummary>, Box<dyn Error + Send + Sync>> {
+    let origin_collector_id = storage
+        .get_native_session(id)
         .await?
-        .into_iter()
-        .map(|session| (session.id, session.origin_collector_id))
+        .and_then(|session| session.origin_collector_id);
+    let mut events = storage
+        .list_canonical_events_for_sessions(&[id.to_owned()])
+        .await?;
+    events.sort_by(|left, right| {
+        left.timestamp
+            .as_str()
+            .cmp(right.timestamp.as_str())
+            .then(left.sequence.cmp(&right.sequence))
+    });
+    Ok(summarize_session(id, &events, origin_collector_id))
+}
+
+/// Reduces ordered session events to compact correlation inputs.
+fn summarize_session(
+    id: &str,
+    events: &[sessionmesh_core::event::CanonicalEvent],
+    origin_collector_id: Option<String>,
+) -> Option<SessionSummary> {
+    let started_at = events
+        .first()
+        .and_then(|event| chrono::DateTime::parse_from_rfc3339(event.timestamp.as_str()).ok())?;
+    let ended_at = events
+        .last()
+        .and_then(|event| chrono::DateTime::parse_from_rfc3339(event.timestamp.as_str()).ok())
+        .unwrap_or(started_at);
+    let cwd = events
+        .iter()
+        .find_map(|event| event.workspace.as_ref()?.cwd.as_deref().map(normalize_cwd));
+    let objective = events
+        .iter()
+        .find(|event| event.kind == sessionmesh_core::event::EventKind::UserMessage)
+        .and_then(|event| event.payload.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map_or_else(
+            || {
+                cwd.as_ref().map_or_else(
+                    || "Continue agent work".to_owned(),
+                    |cwd| format!("Continue work in {cwd}"),
+                )
+            },
+            compact_objective,
+        );
+    let content_terms = events
+        .iter()
+        .filter_map(|event| {
+            event
+                .payload
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+        })
+        .flat_map(content_terms)
         .collect();
-    let mut grouped = BTreeMap::<String, Vec<sessionmesh_core::event::CanonicalEvent>>::new();
-    for event in storage.list_canonical_events().await? {
-        grouped
-            .entry(event.native_session_id.clone())
-            .or_default()
-            .push(event);
-    }
-    let mut summaries = Vec::new();
-    for (id, mut events) in grouped {
-        events.sort_by(|left, right| {
-            left.timestamp
-                .as_str()
-                .cmp(right.timestamp.as_str())
-                .then(left.sequence.cmp(&right.sequence))
-        });
-        let Some(started_at) = events
+    Some(SessionSummary {
+        id: id.to_owned(),
+        tool_family: events
             .first()
-            .and_then(|event| chrono::DateTime::parse_from_rfc3339(event.timestamp.as_str()).ok())
-        else {
-            continue;
-        };
-        let ended_at = events
-            .last()
-            .and_then(|event| chrono::DateTime::parse_from_rfc3339(event.timestamp.as_str()).ok())
-            .unwrap_or(started_at);
-        let cwd = events
-            .iter()
-            .find_map(|event| event.workspace.as_ref()?.cwd.as_deref().map(normalize_cwd));
-        let objective = events
-            .iter()
-            .find(|event| event.kind == sessionmesh_core::event::EventKind::UserMessage)
-            .and_then(|event| event.payload.get("text"))
-            .and_then(serde_json::Value::as_str)
-            .filter(|text| !text.trim().is_empty())
-            .map_or_else(
-                || {
-                    cwd.as_ref().map_or_else(
-                        || "Continue agent work".to_owned(),
-                        |cwd| format!("Continue work in {cwd}"),
-                    )
-                },
-                compact_objective,
-            );
-        let content_terms = events
-            .iter()
-            .filter_map(|event| {
-                event
-                    .payload
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-            })
-            .flat_map(content_terms)
-            .collect();
-        let origin_collector_id = origins.get(&id).cloned().flatten();
-        summaries.push(SessionSummary {
-            id,
-            tool_family: events
-                .first()
-                .map_or_else(|| "unknown".to_owned(), |event| event.tool.family.clone()),
-            cwd,
-            objective,
-            content_terms,
-            started_at,
-            ended_at,
-            origin_collector_id,
-        });
-    }
-    summaries.sort_by_key(|summary| summary.started_at);
-    Ok(summaries)
+            .map_or_else(|| "unknown".to_owned(), |event| event.tool.family.clone()),
+        cwd,
+        objective,
+        content_terms,
+        started_at,
+        ended_at,
+        origin_collector_id,
+    })
 }
 
 #[derive(Debug)]
@@ -924,10 +1023,11 @@ mod tests {
             user_home: directory.path().join("isolated-home"),
         };
 
+        let mut memory = ScanMemory::default();
         let started = std::time::Instant::now();
-        scan_codex_once(&state, &discovery).await;
+        scan_codex_once(&state, &discovery, &mut memory).await;
         let first_count = storage.event_count().await.unwrap();
-        scan_codex_once(&state, &discovery).await;
+        scan_codex_once(&state, &discovery, &mut memory).await;
         let elapsed = started.elapsed();
 
         assert!(first_count > 0);
@@ -950,7 +1050,7 @@ mod tests {
                 .unwrap();
         assert_eq!(untraceable, 0);
 
-        reconcile_and_refresh(&state, 0.8).await.unwrap();
+        Reconciler::default().reconcile(&state, 0.8).await.unwrap();
         let global = storage.list_global_sessions().await.unwrap().pop().unwrap();
         assert!(
             !storage
@@ -973,5 +1073,181 @@ mod tests {
             response["result"]["structuredContent"]["delivery"]["ingestion_excluded"],
             true
         );
+    }
+
+    fn user_event(
+        session: &str,
+        sequence: u64,
+        text: &str,
+    ) -> sessionmesh_core::event::CanonicalEvent {
+        use sessionmesh_core::event::{
+            CanonicalEvent, EventDraft, EventKind, EventProvenance, EventTimestamp,
+            TimestampPrecision, ToolIdentity,
+        };
+        CanonicalEvent::from_draft(EventDraft {
+            tool: ToolIdentity {
+                family: "codex".to_owned(),
+                surface: "cli".to_owned(),
+                profile: "default".to_owned(),
+            },
+            native_session_id: session.to_owned(),
+            sequence,
+            timestamp: EventTimestamp::parse(format!("2026-07-22T10:00:{sequence:02}Z")).unwrap(),
+            timestamp_precision: TimestampPrecision::Second,
+            kind: EventKind::UserMessage,
+            workspace: None,
+            payload: std::collections::BTreeMap::from([("text".to_owned(), text.into())]),
+            provenance: EventProvenance {
+                source_path: format!("/sources/{session}.jsonl"),
+                original_path: None,
+                source_offset: sequence,
+                source_generation: "gen".to_owned(),
+                adapter_version: "0.1.0".to_owned(),
+                ingestion_sequence: sequence,
+                ordering_confidence: Some(1.0),
+            },
+        })
+        .unwrap()
+    }
+
+    async fn commit_events(
+        storage: &Storage,
+        session: &str,
+        events: Vec<sessionmesh_core::event::CanonicalEvent>,
+    ) {
+        use sessionmesh_storage::{CursorRepository, IngestionBatch, IngestionCursor};
+        let last = events.last().map_or(0, |event| event.sequence);
+        storage
+            .commit_batch(
+                &IngestionBatch {
+                    raw_objects: Vec::new(),
+                    events,
+                    cursor: IngestionCursor {
+                        source_id: format!("test:{session}"),
+                        source_generation: "gen".to_owned(),
+                        byte_offset: last + 1,
+                        next_sequence: last + 1,
+                        partial_line: Vec::new(),
+                        updated_at: "2026-07-22T10:00:00Z".to_owned(),
+                    },
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn handoff_count(storage: &Storage, global_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM handoffs WHERE global_session_id = ?")
+            .bind(global_id)
+            .fetch_one(storage.pool())
+            .await
+            .unwrap()
+    }
+
+    async fn global_of(storage: &Storage, native: &str) -> String {
+        storage
+            .list_all_session_members()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|member| member.native_session_id == native)
+            .unwrap()
+            .global_session_id
+    }
+
+    #[tokio::test]
+    async fn reconcile_without_new_events_does_no_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(
+            directory.path().join("sessionmesh.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .unwrap();
+        let state = ApiState::new(storage.clone(), "test-token", Vec::new());
+        commit_events(
+            &storage,
+            "codex:a",
+            vec![user_event("codex:a", 1, "alpha work")],
+        )
+        .await;
+
+        let mut reconciler = Reconciler::default();
+        let first = reconciler.reconcile(&state, 0.8).await.unwrap();
+        let second = reconciler.reconcile(&state, 0.8).await.unwrap();
+
+        assert_eq!(first.len(), 1);
+        assert!(
+            second.is_empty(),
+            "idle reconcile must not refresh handoffs"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_refreshes_only_globals_of_changed_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(
+            directory.path().join("sessionmesh.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .unwrap();
+        let state = ApiState::new(storage.clone(), "test-token", Vec::new());
+        commit_events(
+            &storage,
+            "codex:a",
+            vec![user_event("codex:a", 1, "alpha work")],
+        )
+        .await;
+        commit_events(
+            &storage,
+            "codex:b",
+            vec![user_event("codex:b", 2, "bravo work")],
+        )
+        .await;
+        let mut reconciler = Reconciler::default();
+        reconciler.reconcile(&state, 0.8).await.unwrap();
+        let global_a = global_of(&storage, "codex:a").await;
+        let global_b = global_of(&storage, "codex:b").await;
+        let before_a = handoff_count(&storage, &global_a).await;
+        let before_b = handoff_count(&storage, &global_b).await;
+
+        commit_events(
+            &storage,
+            "codex:a",
+            vec![user_event("codex:a", 3, "alpha follow-up")],
+        )
+        .await;
+        let refreshed = reconciler.reconcile(&state, 0.8).await.unwrap();
+
+        assert_eq!(refreshed, vec![global_a.clone()]);
+        assert_eq!(handoff_count(&storage, &global_a).await, before_a + 1);
+        assert_eq!(handoff_count(&storage, &global_b).await, before_b);
+    }
+
+    #[test]
+    fn scan_memory_skips_files_until_their_size_or_mtime_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        fs::write(&path, b"one\n").unwrap();
+        let mut memory = ScanMemory::default();
+
+        let first = ScanMemory::stamp(&path).unwrap();
+        assert!(
+            !memory.is_unchanged(&path, &first),
+            "unseen files are scanned"
+        );
+        memory.remember(&path, first);
+        let second = ScanMemory::stamp(&path).unwrap();
+        assert!(memory.is_unchanged(&path, &second));
+
+        fs::write(&path, b"one\ntwo\n").unwrap();
+        let third = ScanMemory::stamp(&path).unwrap();
+        assert!(
+            !memory.is_unchanged(&path, &third),
+            "growth must be scanned"
+        );
+        assert!(ScanMemory::stamp(&directory.path().join("missing")).is_none());
     }
 }

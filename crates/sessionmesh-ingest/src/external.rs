@@ -12,6 +12,7 @@ use sessionmesh_storage::{
     CursorRepository, IngestionBatch, IngestionCursor, RawObject, Storage, StorageError,
 };
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncSeekExt as _};
 
 /// Supported read-only external session formats.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +159,9 @@ pub async fn prepare_external(
     imported_at: &str,
     prior_cursor: Option<&IngestionCursor>,
 ) -> Result<Option<IngestionBatch>, ExternalError> {
+    if source.tool == ExternalTool::ClaudeCode {
+        return prepare_claude_append(source, imported_at, prior_cursor).await;
+    }
     let metadata = tokio::fs::metadata(&source.path).await?;
     let source_id = external_source_id(source);
     let fingerprint = metadata_fingerprint(&source.path, &metadata);
@@ -174,9 +178,14 @@ pub async fn prepare_external(
             |timestamp| timestamp.to_rfc3339(),
         );
     let parsed = match source.tool {
-        ExternalTool::ClaudeCode => {
-            parse_claude(&bytes, source, &stable_generation, &fallback_timestamp)?
-        }
+        ExternalTool::ClaudeCode => parse_claude(
+            &bytes,
+            source,
+            &stable_generation,
+            &fallback_timestamp,
+            0,
+            0,
+        )?,
         ExternalTool::Continue => {
             parse_continue(&bytes, source, &stable_generation, &fallback_timestamp)?
         }
@@ -217,6 +226,108 @@ pub async fn prepare_external(
     }))
 }
 
+/// Prepares an append-only Claude Code transcript for incremental import.
+///
+/// Claude transcripts only grow, so the cursor remembers the byte offset of the
+/// last complete line and its next event sequence; each pass reads and parses
+/// only the bytes after it. An incomplete trailing line is left unconsumed
+/// until its newline arrives. A shrunken file or a different first line means
+/// the transcript was truncated or replaced, so it is reread from the start;
+/// deterministic event and raw-object IDs keep that replay idempotent.
+async fn prepare_claude_append(
+    source: &ExternalSource,
+    imported_at: &str,
+    prior_cursor: Option<&IngestionCursor>,
+) -> Result<Option<IngestionBatch>, ExternalError> {
+    let metadata = tokio::fs::metadata(&source.path).await?;
+    let source_id = external_source_id(source);
+    let stable_generation = stable_generation(&source.path);
+    let size = metadata.len();
+    let identity = append_identity(&source.path, &stable_generation).await?;
+    let (start_offset, start_sequence) = match prior_cursor {
+        Some(cursor) if cursor.source_generation == identity && cursor.byte_offset <= size => {
+            (cursor.byte_offset, cursor.next_sequence)
+        }
+        _ => (0, 0),
+    };
+    if start_offset == size && start_offset > 0 {
+        return Ok(None);
+    }
+
+    let mut file = tokio::fs::File::open(&source.path).await?;
+    file.seek(std::io::SeekFrom::Start(start_offset)).await?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).await?;
+    let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
+        return Ok(None);
+    };
+    bytes.truncate(last_newline + 1);
+    let consumed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+
+    let fallback_timestamp = metadata
+        .modified()
+        .map(chrono::DateTime::<chrono::Utc>::from)
+        .map_or_else(
+            |_| imported_at.to_owned(),
+            |timestamp| timestamp.to_rfc3339(),
+        );
+    let parsed = parse_claude(
+        &bytes,
+        source,
+        &stable_generation,
+        &fallback_timestamp,
+        start_offset,
+        start_sequence,
+    )?;
+    let next_sequence = start_sequence.saturating_add(u64::try_from(parsed.len()).unwrap_or(0));
+    let events = parsed
+        .iter()
+        .map(|record| record.event.clone())
+        .collect::<Vec<_>>();
+    let raw_objects = parsed
+        .into_iter()
+        .map(|record| RawObject {
+            id: raw_id(&stable_generation, record.offset, &record.raw),
+            bytes: record.raw,
+            source_path: source.path.to_string_lossy().into_owned(),
+            original_path: Some(source.original_path.to_string_lossy().into_owned()),
+            source_offset: record.offset,
+            source_size: size,
+            source_modified_at: Some(fallback_timestamp.clone()),
+            source_permissions: permissions(&metadata),
+            source_generation: stable_generation.clone(),
+            parser_version: env!("CARGO_PKG_VERSION").to_owned(),
+            imported_at: imported_at.to_owned(),
+        })
+        .collect();
+    Ok(Some(IngestionBatch {
+        raw_objects,
+        events,
+        cursor: IngestionCursor {
+            source_id,
+            source_generation: identity,
+            byte_offset: start_offset.saturating_add(consumed),
+            next_sequence,
+            partial_line: Vec::new(),
+            updated_at: imported_at.to_owned(),
+        },
+    }))
+}
+
+/// Identifies an append-only transcript by its path and first line, so a
+/// replaced file is detected even when the new file is larger than the cursor.
+async fn append_identity(path: &Path, stable_generation: &str) -> Result<String, ExternalError> {
+    const FIRST_LINE_LIMIT: u64 = 1024 * 1024;
+    let file = tokio::fs::File::open(path).await?;
+    let mut reader = tokio::io::BufReader::new(file.take(FIRST_LINE_LIMIT));
+    let mut first_line = Vec::new();
+    reader.read_until(b'\n', &mut first_line).await?;
+    let mut hasher = Sha256::new();
+    hasher.update(stable_generation.as_bytes());
+    hasher.update(&first_line);
+    Ok(format_digest("append_", hasher.finalize()))
+}
+
 #[derive(Clone, Debug)]
 struct ParsedRecord {
     offset: u64,
@@ -224,14 +335,19 @@ struct ParsedRecord {
     event: CanonicalEvent,
 }
 
+/// Parses complete Claude transcript lines, where `bytes[0]` sits at
+/// `base_offset` in the source file and the first emitted event continues at
+/// `base_sequence`.
 fn parse_claude(
     bytes: &[u8],
     source: &ExternalSource,
     generation: &str,
     fallback_timestamp: &str,
+    base_offset: u64,
+    base_sequence: u64,
 ) -> Result<Vec<ParsedRecord>, ExternalError> {
     let mut records = Vec::new();
-    let mut offset = 0_u64;
+    let mut offset = base_offset;
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
         let start = offset;
         offset = offset.saturating_add(u64::try_from(line.len()).unwrap_or(u64::MAX));
@@ -280,7 +396,7 @@ fn parse_claude(
             event: event(
                 source,
                 &session_id,
-                u64::try_from(records.len()).unwrap_or(u64::MAX),
+                base_sequence.saturating_add(u64::try_from(records.len()).unwrap_or(u64::MAX)),
                 timestamp,
                 kind,
                 workspace,
@@ -605,6 +721,8 @@ impl From<sessionmesh_core::event::EventError> for ExternalError {
 
 #[cfg(test)]
 mod tests {
+    use sessionmesh_storage::EventRepository;
+
     use super::*;
 
     #[tokio::test]
@@ -702,5 +820,98 @@ mod tests {
                 .as_deref(),
             Some("/workspace/repo")
         );
+    }
+
+    const CLAUDE_USER: &str = "{\"type\":\"user\",\"sessionId\":\"claude-inc\",\"timestamp\":\"2026-07-21T10:00:00Z\",\"cwd\":\"/repo\",\"message\":{\"content\":\"Build it\"}}\n";
+    const CLAUDE_REPLY: &str = "{\"type\":\"assistant\",\"sessionId\":\"claude-inc\",\"timestamp\":\"2026-07-21T10:01:00Z\",\"cwd\":\"/repo\",\"message\":{\"content\":\"Done\"}}\n";
+    const CLAUDE_FOLLOW_UP: &str = "{\"type\":\"user\",\"sessionId\":\"claude-inc\",\"timestamp\":\"2026-07-21T10:02:00Z\",\"cwd\":\"/repo\",\"message\":{\"content\":\"More\"}}\n";
+
+    async fn claude_fixture(
+        directory: &tempfile::TempDir,
+    ) -> (Storage, ExternalSource, std::path::PathBuf) {
+        let path = directory.path().join("claude/projects/repo/session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let storage = Storage::open(
+            directory.path().join("state.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .unwrap();
+        std::fs::write(&path, format!("{CLAUDE_USER}{CLAUDE_REPLY}")).unwrap();
+        let source = discover_claude(&directory.path().join("claude"), Path::new("~/.claude"))
+            .pop()
+            .unwrap();
+        (storage, source, path)
+    }
+
+    #[tokio::test]
+    async fn claude_append_parses_only_the_new_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let (storage, source, path) = claude_fixture(&directory).await;
+        let first = ingest_external(&storage, &source, "2026-07-21T11:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(first.events.len(), 2);
+
+        let mut appended = std::fs::read(&path).unwrap();
+        appended.extend_from_slice(CLAUDE_FOLLOW_UP.as_bytes());
+        std::fs::write(&path, appended).unwrap();
+        let second = ingest_external(&storage, &source, "2026-07-21T11:01:00Z")
+            .await
+            .unwrap();
+
+        assert!(second.changed);
+        assert_eq!(second.events.len(), 1, "only the appended record is read");
+        assert_eq!(second.events[0].sequence, 2);
+        assert_eq!(storage.event_count().await.unwrap(), 3);
+        let unchanged = ingest_external(&storage, &source, "2026-07-21T11:02:00Z")
+            .await
+            .unwrap();
+        assert!(!unchanged.changed);
+    }
+
+    #[tokio::test]
+    async fn claude_incomplete_trailing_line_waits_for_its_newline() {
+        let directory = tempfile::tempdir().unwrap();
+        let (storage, source, path) = claude_fixture(&directory).await;
+        ingest_external(&storage, &source, "2026-07-21T11:00:00Z")
+            .await
+            .unwrap();
+
+        let partial = &CLAUDE_FOLLOW_UP[..CLAUDE_FOLLOW_UP.len() - 12];
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(partial.as_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let pending = ingest_external(&storage, &source, "2026-07-21T11:01:00Z")
+            .await
+            .unwrap();
+        assert!(!pending.changed);
+
+        bytes.truncate(bytes.len() - partial.len());
+        bytes.extend_from_slice(CLAUDE_FOLLOW_UP.as_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let completed = ingest_external(&storage, &source, "2026-07-21T11:02:00Z")
+            .await
+            .unwrap();
+        assert_eq!(completed.events.len(), 1);
+        assert_eq!(storage.event_count().await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn claude_truncated_or_replaced_file_is_reread_from_the_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let (storage, source, path) = claude_fixture(&directory).await;
+        ingest_external(&storage, &source, "2026-07-21T11:00:00Z")
+            .await
+            .unwrap();
+
+        std::fs::write(&path, CLAUDE_FOLLOW_UP).unwrap();
+        let replaced = ingest_external(&storage, &source, "2026-07-21T11:01:00Z")
+            .await
+            .unwrap();
+
+        assert!(replaced.changed);
+        assert_eq!(replaced.events.len(), 1);
+        assert_eq!(replaced.events[0].sequence, 0);
     }
 }

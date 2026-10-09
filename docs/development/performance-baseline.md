@@ -48,8 +48,20 @@ performance claims or capacity targets are published.
 
 ## Known scaling limits
 
-The MVP currently loads canonical events before API sorting, polls Codex
-discovery at the configured debounce interval, and uses SQLite FTS5 without a
-separate vector index. These are explicit roadmap targets; limits are bounded
-at external pagination and streaming surfaces but internal large-store query
-optimization remains post-MVP.
+Ingestion and reconciliation cost is proportional to changed data (see
+[ADR-010](../adr/010-derived-state-is-maintained-incrementally.md)): a rowid
+watermark selects changed sessions, Claude Code transcripts resume from a byte
+offset, OpenCode replays only updated sessions, and unchanged files are skipped
+by size and modification time. Idle cost is one indexed lookup per reconcile
+interval plus one `stat` per known file per scan tick.
+
+Remaining limits:
+
+- The daemon polls instead of using native watcher notifications.
+- The correlator keeps one compact summary (terms and times) per session in
+  memory; payloads are not retained.
+- Candidate matching compares a new session against every existing member.
+- The API still loads canonical events before sorting large result sets, and
+  SQLite FTS5 stores a full copy of each canonical event.
+- Continue and Agy snapshot files are reread in full when they change.
+- Handoff snapshots are immutable and are not pruned.

@@ -60,6 +60,7 @@ nav:
           - ADR-007 Adapter Protocol: adr/007-custom-adapters-use-a-versioned-protocol.md
           - ADR-008 Automatic Context Sync: adr/008-sync-derived-context-not-native-transcripts.md
           - ADR-009 Event Chronology: adr/009-chronology-uses-multiple-ordering-signals.md
+          - ADR-010 Incremental Derived State: adr/010-derived-state-is-maintained-incrementally.md
   - Development:
       - Engineering Standards: development/engineering-standards.md
       - Configuration: development/configuration.md
