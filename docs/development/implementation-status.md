@@ -357,15 +357,27 @@ Final validation completed:
 
 Known limitations:
 
-- The daemon currently polls Codex discovery rather than using native watcher
-  notifications.
+- The daemon currently polls discovery rather than using native watcher
+  notifications; unchanged files are skipped by size and modification time.
 - Large-store API sorting still loads canonical event projections before
   pagination.
+- Reconciliation, Claude Code ingestion, and OpenCode ingestion are
+  incremental (ADR-010); Continue and Agy still reread changed snapshot files.
 - OpenCode imports text parts from its allowlisted SQLite session tables. Agy
   currently imports stable prompt history; protobuf assistant trajectories
   await a supported schema or export surface.
 - Podman was not installed on the validation host. The image and Compose model
   remain OCI-compatible, while Docker is the exercised runtime.
+
+Post-MVP performance work (2026-10-09, ADR-010): a production-scale instance
+(236,000 events) consumed about 100 % CPU and 14.6 GiB of memory because every
+interval reprocessed the whole history. Reconciliation, handoff refresh, Claude
+Code ingestion, OpenCode ingestion, and the scan loop are now proportional to
+changed data. Verification: Clippy with warnings denied and the full Rust
+workspace test suite pass; new tests cover the watermark, idle and per-session
+reconciliation, Claude append/partial-line/replacement, OpenCode session-scoped
+replay, and scan memory. Real-world resource figures after rollout are not yet
+measured.
 
 Release readiness: the local-first MVP satisfies Prompts 00–14. The first
 public commit may be staged after the final sensitive-data audit. Nothing may

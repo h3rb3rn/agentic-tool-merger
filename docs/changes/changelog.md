@@ -5,6 +5,23 @@ changes to SessionMesh are recorded here.
 
 ## Unreleased
 
+### Performance
+
+- Reconciliation is now incremental (ADR-010). It detects new activity with a
+  `native_events` rowid watermark, reloads and re-summarizes only changed
+  sessions, and regenerates handoffs only for their global sessions. Idle
+  passes cost one indexed lookup. Previously every pass loaded the full event
+  history into memory and refreshed every handoff.
+- Claude Code transcripts are imported from a persisted byte-offset cursor
+  instead of being reread and replayed on every append. Truncation or
+  replacement is detected and reread idempotently.
+- OpenCode imports replay only sessions with parts updated since the stored
+  high-water mark.
+- The scan skips files whose size and modification time are unchanged instead
+  of querying a cursor per file on every tick.
+- One-time effect: after upgrading, Claude and OpenCode sources are reread once
+  because their cursor identity changed; replays are idempotent.
+
 ### Changed
 
 - Decoupled the daemon's cheap file discovery/incremental-ingest scan from

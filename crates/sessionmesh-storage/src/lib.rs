@@ -629,6 +629,43 @@ impl Storage {
             .collect()
     }
 
+    /// Reports native sessions that gained events after `watermark`.
+    ///
+    /// The watermark is the `rowid` of `native_events`, which only advances
+    /// when an event is genuinely inserted: idempotent re-ingestion of known
+    /// events leaves it untouched. Returns the affected session IDs in stable
+    /// order plus the new watermark to pass on the next call. Starting from `0`
+    /// reports every session that has events.
+    ///
+    /// This is a cheap rowid-range scan that never loads event payloads, so
+    /// derived-state maintenance can detect new activity (local or from a
+    /// remote collector) without rereading the event history.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the query fails.
+    pub async fn native_sessions_changed_since(
+        &self,
+        watermark: i64,
+    ) -> Result<(Vec<String>, i64), StorageError> {
+        let new_watermark: i64 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(rowid), 0) FROM native_events")
+                .fetch_one(&self.pool)
+                .await?;
+        if new_watermark <= watermark {
+            return Ok((Vec::new(), watermark));
+        }
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT native_session_id FROM native_events
+             WHERE rowid > ? AND rowid <= ? ORDER BY native_session_id",
+        )
+        .bind(watermark)
+        .bind(new_watermark)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok((ids, new_watermark))
+    }
+
     /// Loads canonical events restricted to the given native session identifiers.
     ///
     /// Uses the `native_events_session_sequence` index instead of a full table
@@ -2237,6 +2274,56 @@ mod tests {
             session.origin_collector_id.as_deref(),
             Some("collector_abc")
         );
+    }
+
+    #[tokio::test]
+    async fn changed_session_watermark_reports_only_sessions_with_new_events() {
+        let (_directory, storage) = test_storage().await;
+        let first = IngestionBatch {
+            raw_objects: vec![raw("raw-1", b"line")],
+            events: vec![event(1)],
+            cursor: cursor(100),
+        };
+        storage
+            .commit_batch(&first, None)
+            .await
+            .expect("valid batch should commit");
+
+        let (changed, watermark) = storage
+            .native_sessions_changed_since(0)
+            .await
+            .expect("watermark query should work");
+        assert_eq!(changed, vec!["native-session".to_owned()]);
+        assert!(watermark > 0);
+
+        // Re-committing identical events is idempotent and must not look like
+        // new activity, otherwise rescans would re-trigger reconciliation.
+        storage
+            .commit_batch(&first, None)
+            .await
+            .expect("idempotent batch should commit");
+        let (changed, unchanged_watermark) = storage
+            .native_sessions_changed_since(watermark)
+            .await
+            .expect("watermark query should work");
+        assert!(changed.is_empty());
+        assert_eq!(unchanged_watermark, watermark);
+
+        let second = IngestionBatch {
+            raw_objects: vec![raw("raw-2", b"line two")],
+            events: vec![event(2)],
+            cursor: cursor(200),
+        };
+        storage
+            .commit_batch(&second, None)
+            .await
+            .expect("valid batch should commit");
+        let (changed, advanced) = storage
+            .native_sessions_changed_since(watermark)
+            .await
+            .expect("watermark query should work");
+        assert_eq!(changed, vec!["native-session".to_owned()]);
+        assert!(advanced > watermark);
     }
 
     #[tokio::test]

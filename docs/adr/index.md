@@ -14,3 +14,4 @@ captured by a new ADR that supersedes the previous one.
 | [007](007-custom-adapters-use-a-versioned-protocol.md)    | Custom adapters use a versioned protocol            | Accepted |
 | [008](008-sync-derived-context-not-native-transcripts.md) | Synchronize derived context, not native transcripts | Accepted |
 | [009](009-chronology-uses-multiple-ordering-signals.md)   | Chronology uses multiple ordering signals           | Accepted |
+| [010](010-derived-state-is-maintained-incrementally.md)   | Derived state is maintained incrementally           | Accepted |
