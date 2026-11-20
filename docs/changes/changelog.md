@@ -13,7 +13,8 @@ changes to SessionMesh are recorded here.
   provenance; tool dumps and duplicate chat snapshots are excluded.
 - Grok conversations now participate in correlation, search and shared handoffs.
   Added previous/next session pages so the GUI can reach archives beyond its
-  first 200 session summaries.
+  first 200 session summaries. Plain-text envelopes render once alongside
+  expandable full canonical evidence.
 
 ### Web authentication
 

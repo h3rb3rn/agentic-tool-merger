@@ -695,3 +695,14 @@ records, bounded batches/oversized replies and replacement. A daemon integration
 test verifies discovery through global-session handoff without source changes.
 A GUI regression failed before adding archive cursor navigation to reach Grok
 sessions beyond the first 200 records. Runtime deployment verification follows.
+
+A read-only scan of the real archive found 979 user chunks, 3,154 assistant
+chunks and 11,126 thought chunks, plus one malformed complete JSON line at byte
+2,359,716 in one source. That source is intentionally not advanced through the
+corrupt batch, and its native data remains unchanged. Open operational task:
+resolve or explicitly quarantine that damaged native record through a verified,
+lossless error-reporting design; do not silently skip it or rewrite the source.
+Other sources continue independently. A GUI regression also caught duplicate
+presentation of normalized text and its original Grok content envelope. The
+presentation now shows text once while retaining expandable canonical evidence;
+persisted event identities/content are unchanged.

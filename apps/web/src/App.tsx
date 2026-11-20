@@ -1083,7 +1083,24 @@ function EventContent({ detail }: { detail: CanonicalEvent }) {
   ];
   const values = preferredFields
     .map((field) => [field, detail.payload[field]] as const)
-    .filter((entry) => entry[1] !== undefined && entry[1] !== null);
+    .filter(([field, value]) => {
+      if (value === undefined || value === null) return false;
+      if (
+        field !== "content" ||
+        typeof value !== "object" ||
+        Array.isArray(value)
+      )
+        return true;
+      // Grok keeps the original content envelope alongside normalized text.
+      // Show that text once; full canonical evidence remains expandable below.
+      return !(
+        "type" in value &&
+        value.type === "text" &&
+        "text" in value &&
+        value.text === detail.payload.text &&
+        Object.keys(value).every((key) => key === "type" || key === "text")
+      );
+    });
   const sourcePath = String(detail.provenance.source_path ?? "Unknown source");
   return (
     <section className="event-content" aria-label="Event content">

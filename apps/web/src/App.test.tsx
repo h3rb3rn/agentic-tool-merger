@@ -597,3 +597,28 @@ describe("session archive pages", () => {
     ).toBeInTheDocument();
   });
 });
+
+it("renders normalized Grok text once while retaining canonical content evidence", async () => {
+  const api = client({
+    getEvent: vi.fn().mockResolvedValue({
+      ...events[0],
+      schema_version: "1.0",
+      payload: {
+        text: "Grok reply",
+        content: { type: "text", text: "Grok reply" },
+      },
+      provenance: {},
+    }),
+  });
+  const { container } = render(<App client={api} />);
+  await screen.findByText("Tool Call");
+  fireEvent.click(
+    screen.getAllByRole("button", { name: "Reveal event data" })[0],
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Reveal now" }));
+  expect(await screen.findAllByText("Grok reply")).toHaveLength(1);
+  expect(container.querySelectorAll(".event-content > div")).toHaveLength(1);
+  expect(container.querySelector(".event-content details")).toHaveTextContent(
+    '"type": "text"',
+  );
+});
