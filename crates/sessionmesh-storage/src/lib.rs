@@ -19,6 +19,9 @@ use sqlx::{
 };
 use tokio::io::AsyncWriteExt;
 
+mod resources;
+pub use resources::{EventOverview, MaintenanceReport, SessionStatistics, is_disposable_event};
+
 /// Embedded database migrations for every supported `SessionMesh` installation.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -513,6 +516,28 @@ impl Storage {
         database_path: impl AsRef<Path>,
         blob_root: impl AsRef<Path>,
     ) -> Result<Self, StorageError> {
+        Self::open_configured(database_path, blob_root, None).await
+    }
+
+    /// Opens storage with an explicit shared policy before derived-index backfill.
+    /// This avoids reindexing legacy tool dumps that the configured policy will discard.
+    ///
+    /// # Errors
+    /// Returns path, permission, database, migration, or canonical validation errors.
+    pub async fn open_with_retention(
+        database_path: impl AsRef<Path>,
+        blob_root: impl AsRef<Path>,
+        conversation_only: bool,
+    ) -> Result<Self, StorageError> {
+        Self::open_configured(database_path, blob_root, Some(conversation_only)).await
+    }
+
+    /// Serializes schema setup and restores projections before accepting requests.
+    async fn open_configured(
+        database_path: impl AsRef<Path>,
+        blob_root: impl AsRef<Path>,
+        conversation_only: Option<bool>,
+    ) -> Result<Self, StorageError> {
         let database_path = database_path.as_ref();
         if database_path.as_os_str().is_empty() {
             return Err(StorageError::InvalidInput {
@@ -533,15 +558,23 @@ impl Storage {
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(Duration::from_secs(5));
+        .busy_timeout(Duration::from_secs(5))
+        .pragma("cache_size", "-8192")
+        .pragma("journal_size_limit", "16777216")
+        .pragma("auto_vacuum", "INCREMENTAL");
         let pool = SqlitePoolOptions::new()
-            .max_connections(5)
+            .max_connections(3)
             .connect_with(options)
             .await?;
         set_file_permissions(database_path).await?;
         MIGRATOR.run(&pool).await?;
         let blobs = BlobStore::open(blob_root).await?;
-        Ok(Self { pool, blobs })
+        let storage = Self { pool, blobs };
+        if let Some(enabled) = conversation_only {
+            storage.set_conversation_retention(enabled).await?;
+        }
+        storage.backfill_overviews().await?;
+        Ok(storage)
     }
 
     /// Returns the pool for read-only diagnostics and later repository modules.
@@ -649,7 +682,7 @@ impl Storage {
         watermark: i64,
     ) -> Result<(Vec<String>, i64), StorageError> {
         let new_watermark: i64 =
-            sqlx::query_scalar("SELECT COALESCE(MAX(rowid), 0) FROM native_events")
+            sqlx::query_scalar("SELECT MAX(COALESCE((SELECT MAX(rowid) FROM native_events), 0), COALESCE((SELECT value FROM storage_settings WHERE key = 'event_watermark'), 0))")
                 .fetch_one(&self.pool)
                 .await?;
         if new_watermark <= watermark {
@@ -1304,7 +1337,8 @@ impl Storage {
         Ok(result.rows_affected() == 1)
     }
 
-    /// Lists typed observations for handoff generation.
+    /// Lists the latest 128 typed observations for bounded handoff generation.
+    /// All records remain stored; this is a context selection limit.
     ///
     /// # Errors
     ///
@@ -1317,7 +1351,7 @@ impl Storage {
             "SELECT id, request_id, global_session_id, record_type,
                     content, origin, created_at
              FROM session_records WHERE global_session_id = ?
-             ORDER BY created_at, id",
+             ORDER BY created_at DESC, id DESC LIMIT 128",
         )
         .bind(global_session_id)
         .fetch_all(&self.pool)
@@ -1357,8 +1391,10 @@ impl Storage {
             "SELECT e.canonical_json
              FROM native_events_fts f
              JOIN native_events e ON e.event_id = f.event_id
+             JOIN event_overviews o ON o.event_id = e.event_id
              WHERE native_events_fts MATCH ?
-             ORDER BY e.timestamp, e.sequence, e.event_id
+             ORDER BY o.timestamp_seconds, o.timestamp_nanos, o.sequence,
+                      o.source_generation, o.source_offset, o.ingestion_sequence, o.event_id
              LIMIT ? OFFSET ?",
         )
         .bind(query)
@@ -1456,8 +1492,8 @@ pub trait CursorRepository {
 #[async_trait]
 impl RawObjectRepository for Storage {
     async fn store_raw_object(&self, raw: &RawObject) -> Result<StoredRawObject, StorageError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let blob_hash = self.blobs.put(&raw.bytes).await?;
-        let mut transaction = self.pool.begin().await?;
         let stored = insert_raw(&mut transaction, raw, &blob_hash).await?;
         transaction.commit().await?;
         Ok(stored)
@@ -1524,24 +1560,45 @@ impl CursorRepository for Storage {
         origin_collector_id: Option<&str>,
     ) -> Result<(), StorageError> {
         validate_cursor(&batch.cursor)?;
-        let mut blob_hashes = Vec::with_capacity(batch.raw_objects.len());
-        for raw in &batch.raw_objects {
-            blob_hashes.push(self.blobs.put(&raw.bytes).await?);
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let conversation_only = resources::conversation_only(&mut transaction).await?;
+        // Index raw coordinates once; never scan every raw record for every event.
+        let mut retained_coordinates = std::collections::BTreeMap::new();
+        let mut retained_events = std::collections::BTreeSet::new();
+        for event in &batch.events {
+            let key = (
+                event.provenance.source_generation.clone(),
+                event.provenance.source_offset,
+            );
+            let retained = retained_coordinates.entry(key).or_insert(false);
+            let keep = !conversation_only
+                || (!resources::is_disposable_event(event.kind)
+                    && !resources::legacy_discarded(&mut transaction, event.event_id.as_str())
+                        .await?);
+            *retained |= keep;
+            if keep {
+                retained_events.insert(event.event_id.as_str());
+            }
         }
-
-        let mut transaction = self.pool.begin().await?;
-        for (raw, blob_hash) in batch.raw_objects.iter().zip(blob_hashes.iter()) {
-            insert_raw(&mut transaction, raw, blob_hash).await?;
+        let mut raw_ids = std::collections::BTreeMap::new();
+        for raw in &batch.raw_objects {
+            let key = (raw.source_generation.clone(), raw.source_offset);
+            if retained_coordinates.get(&key) == Some(&false) {
+                continue;
+            }
+            let hash = self.blobs.put(&raw.bytes).await?;
+            insert_raw(&mut transaction, raw, &hash).await?;
+            raw_ids.insert(key, raw.id.clone());
         }
         for event in &batch.events {
-            let raw_object_id = batch
-                .raw_objects
-                .iter()
-                .find(|raw| {
-                    raw.source_generation == event.provenance.source_generation
-                        && raw.source_offset == event.provenance.source_offset
-                })
-                .map(|raw| raw.id.as_str());
+            if !retained_events.contains(event.event_id.as_str()) {
+                continue;
+            }
+            let key = (
+                event.provenance.source_generation.clone(),
+                event.provenance.source_offset,
+            );
+            let raw_object_id = raw_ids.get(&key).map(String::as_str);
             insert_event(&mut transaction, event, raw_object_id, origin_collector_id).await?;
         }
         upsert_cursor(&mut transaction, &batch.cursor).await?;
@@ -1737,6 +1794,12 @@ async fn insert_event(
     raw_object_id: Option<&str>,
     origin_collector_id: Option<&str>,
 ) -> Result<bool, StorageError> {
+    if resources::conversation_only(transaction).await?
+        && (resources::is_disposable_event(event.kind)
+            || resources::legacy_discarded(transaction, event.event_id.as_str()).await?)
+    {
+        return Ok(false);
+    }
     let canonical_json = event
         .to_json()
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
@@ -1771,9 +1834,10 @@ async fn insert_event(
     }
     let result = sqlx::query(
         "INSERT INTO native_events (
-            event_id, native_session_id, sequence, timestamp, kind,
+            rowid, event_id, native_session_id, sequence, timestamp, kind,
             canonical_json, raw_object_id, source_offset
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES ((SELECT MAX(COALESCE((SELECT MAX(rowid) FROM native_events), 0),
+             COALESCE((SELECT value FROM storage_settings WHERE key = 'event_watermark'), 0)) + 1), ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(event_id) DO NOTHING",
     )
     .bind(event.event_id.as_str())
@@ -1787,12 +1851,14 @@ async fn insert_event(
     .execute(&mut **transaction)
     .await?;
     if result.rows_affected() == 1 {
+        resources::insert_overview(transaction, event, canonical_json.len()).await?;
         sqlx::query(
-            "INSERT INTO native_events_fts (event_id, searchable_text)
-             VALUES (?, ?)",
+            "INSERT INTO native_events_fts (rowid, event_id, searchable_text)
+             SELECT rowid, ?, ? FROM native_events WHERE event_id = ?",
         )
         .bind(event.event_id.as_str())
-        .bind(&canonical_json)
+        .bind(resources::search_text(event))
+        .bind(event.event_id.as_str())
         .execute(&mut **transaction)
         .await?;
     }
@@ -2021,6 +2087,375 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn overview_order_preserves_offsets_nanoseconds_and_the_full_timestamp_range() {
+        let (_directory, storage) = test_storage().await;
+        for (sequence, timestamp) in [
+            "1600-01-01T00:00:00Z",
+            "2026-01-01T00:00:00.000000002Z",
+            "2026-01-01T01:00:00.000000001+01:00",
+            "2500-01-01T00:00:00Z",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut source = event(sequence as u64);
+            source.timestamp = EventTimestamp::parse(timestamp).unwrap();
+            storage
+                .store_event(&with_kind(source, EventKind::UserMessage))
+                .await
+                .unwrap();
+        }
+        let rows = storage
+            .event_overviews(None, 10, None, None, i64::MAX)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+            vec![0, 2, 1, 3]
+        );
+        let tail = storage
+            .event_overviews(Some(&rows[1].event_id), 10, None, None, i64::MAX)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            tail.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrades_legacy_database_and_keeps_fts_and_rowids_stable_through_vacuum() {
+        use sqlx::{Connection, SqliteConnection, migrate::Migrate};
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("legacy.db");
+        let mut connection = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        connection.ensure_migrations_table().await.unwrap();
+        for migration in MIGRATOR.iter().filter(|migration| migration.version < 5) {
+            connection.apply(migration).await.unwrap();
+        }
+        sqlx::query("INSERT INTO native_sessions (id,tool_family,surface,profile) VALUES ('native-session','codex','cli','default')").execute(&mut connection).await.unwrap();
+        let source = event(0);
+        sqlx::query("INSERT INTO native_events (rowid,event_id,native_session_id,sequence,timestamp,kind,canonical_json,source_offset) VALUES (17,?,'native-session',0,?,'UserMessage',?,0)")
+            .bind(source.event_id.as_str()).bind(source.timestamp.as_str()).bind(source.to_json().unwrap()).execute(&mut connection).await.unwrap();
+        connection.close().await.unwrap();
+        let storage = Storage::open(&database, directory.path().join("blobs"))
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.search_events("hello", 10, 0).await.unwrap(),
+            vec![source.clone()]
+        );
+        assert_eq!(
+            storage.event_rowid(source.event_id.as_str()).await.unwrap(),
+            Some(17)
+        );
+        storage.compact_database().await.unwrap();
+        assert_eq!(
+            storage.event_rowid(source.event_id.as_str()).await.unwrap(),
+            Some(17)
+        );
+        assert_eq!(
+            storage.search_events("hello", 10, 0).await.unwrap(),
+            vec![source]
+        );
+        assert_eq!(
+            storage
+                .event_overviews(None, 10, None, None, i64::MAX)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_retention_preserves_messages_and_shared_raw_bytes() {
+        let (directory, storage) = test_storage().await;
+        let prompt = event(0);
+        let output = with_kind(event(1), EventKind::AssistantMessage);
+        let tool = with_kind(event(2), EventKind::ToolResult);
+        let mut objects = vec![
+            raw("prompt", b"prompt bytes"),
+            raw("output", b"AI output"),
+            raw("tool", b"large source code"),
+        ];
+        objects[1].source_offset = 1;
+        objects[2].source_offset = 2;
+        let batch = IngestionBatch {
+            raw_objects: objects,
+            events: vec![prompt.clone(), output.clone(), tool.clone()],
+            cursor: cursor(3),
+        };
+        storage.commit_batch(&batch, None).await.unwrap();
+        storage.set_conversation_retention(true).await.unwrap();
+        let report = storage.maintain(1).await.unwrap();
+        assert_eq!(report.events_removed, 1);
+        assert!(
+            storage
+                .get_canonical_event(tool.event_id.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for message in [&prompt, &output] {
+            assert_eq!(
+                storage
+                    .get_canonical_event(message.event_id.as_str())
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                Some(message)
+            );
+        }
+        assert_eq!(
+            storage
+                .blobs()
+                .get(&content_hash(b"AI output"))
+                .await
+                .unwrap(),
+            b"AI output"
+        );
+        assert!(
+            !directory
+                .path()
+                .join("blobs")
+                .join(content_hash(b"large source code"))
+                .exists()
+        );
+        storage.commit_batch(&batch, None).await.unwrap();
+        assert_eq!(
+            storage.event_count().await.unwrap(),
+            2,
+            "replay must not resurrect tool payloads"
+        );
+        assert!(
+            !directory
+                .path()
+                .join("blobs")
+                .join(content_hash(b"large source code"))
+                .exists()
+        );
+        let reopened = Storage::open(
+            directory.path().join("sessionmesh.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .unwrap();
+        reopened.store_event(&tool).await.unwrap();
+        assert_eq!(
+            reopened.event_count().await.unwrap(),
+            2,
+            "policy must apply to other processes too"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_raw_survives_and_cleanup_preserves_insertion_watermark() {
+        let (_directory, storage) = test_storage().await;
+        let prompt = event(0);
+        let tool = with_kind(event(0), EventKind::ToolResult);
+        let batch = IngestionBatch {
+            raw_objects: vec![raw("mixed", b"prompt and tool in one record")],
+            events: vec![prompt, tool],
+            cursor: cursor(1),
+        };
+        storage.commit_batch(&batch, None).await.unwrap();
+        let before = storage.event_watermark().await.unwrap();
+        storage.set_conversation_retention(true).await.unwrap();
+        storage.maintain(1).await.unwrap();
+        let shared = storage.get_raw_object("mixed").await.unwrap().unwrap();
+        assert_eq!(
+            storage.blobs().get(&shared.blob_hash).await.unwrap(),
+            b"prompt and tool in one record"
+        );
+        assert_eq!(storage.event_watermark().await.unwrap(), before);
+        storage.store_event(&event(8)).await.unwrap();
+        let (changed, after) = storage.native_sessions_changed_since(before).await.unwrap();
+        assert_eq!(changed, vec!["native-session"]);
+        assert!(after > before);
+    }
+
+    #[tokio::test]
+    async fn orphan_queue_cannot_delete_a_referenced_blob() {
+        let (_directory, storage) = test_storage().await;
+        let stored = storage
+            .store_raw_object(&raw("live", b"surviving conversation"))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO blob_cleanup_queue VALUES (?)")
+            .bind(&stored.blob_hash)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        assert_eq!(storage.maintain(1).await.unwrap().blobs_removed, 0);
+        assert_eq!(
+            storage.blobs().get(&stored.blob_hash).await.unwrap(),
+            b"surviving conversation"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_claude_cleanup_recognizes_only_pure_tool_envelopes() {
+        let (_directory, storage) = test_storage().await;
+        let mut source = event(0);
+        source.tool.family = "claude".into();
+        source.payload.insert("text".into(), "".into());
+        let tool = with_kind(source, EventKind::UserMessage);
+        let mut text = event(1);
+        text.tool.family = "claude".into();
+        let text = with_kind(text, EventKind::AssistantMessage);
+        let first = raw(
+            "old-tool",
+            br#"{"message":{"content":[{"type":"tool_result","content":"old code snapshot"}]}}"#,
+        );
+        let mut second = raw(
+            "real-output",
+            br#"{"message":{"content":[{"type":"text","text":"keep code in AI response"}]}}"#,
+        );
+        second.source_offset = 1;
+        let batch = IngestionBatch {
+            raw_objects: vec![first, second],
+            events: vec![tool.clone(), text.clone()],
+            cursor: cursor(2),
+        };
+        storage.commit_batch(&batch, None).await.unwrap();
+        storage.set_conversation_retention(true).await.unwrap();
+        assert_eq!(storage.maintain(1).await.unwrap().events_removed, 1);
+        assert!(
+            storage
+                .get_canonical_event(tool.event_id.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            storage
+                .get_canonical_event(text.event_id.as_str())
+                .await
+                .unwrap(),
+            Some(text)
+        );
+        assert!(
+            storage
+                .get_raw_object("real-output")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        storage.commit_batch(&batch, None).await.unwrap();
+        assert_eq!(storage.event_count().await.unwrap(), 1);
+        assert!(storage.get_raw_object("old-tool").await.unwrap().is_none());
+        assert_eq!(storage.maintain(1).await.unwrap().events_removed, 0);
+    }
+
+    fn with_kind(source: CanonicalEvent, kind: EventKind) -> CanonicalEvent {
+        CanonicalEvent::from_draft(EventDraft {
+            tool: source.tool,
+            native_session_id: source.native_session_id,
+            sequence: source.sequence,
+            timestamp: source.timestamp,
+            timestamp_precision: source.timestamp_precision,
+            kind,
+            workspace: source.workspace,
+            payload: source.payload,
+            provenance: source.provenance,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn maintenance_bounds_derived_history_without_deleting_observations() {
+        let (_directory, storage) = test_storage().await;
+        storage
+            .create_global_session(&StoredGlobalSession {
+                id: "g".into(),
+                objective: "test".into(),
+                created_at: "a".into(),
+                updated_at: "a".into(),
+            })
+            .await
+            .unwrap();
+        let record = SessionRecord {
+            id: "record".into(),
+            request_id: "request".into(),
+            global_session_id: "g".into(),
+            record_type: "decision".into(),
+            content: "Keep user decisions".into(),
+            origin: "user_observation".into(),
+            created_at: "0".into(),
+        };
+        storage.store_session_record(&record).await.unwrap();
+        for number in 0..5 {
+            storage
+                .store_handoff(
+                    &StoredHandoff {
+                        id: format!("h{number}"),
+                        global_session_id: "g".into(),
+                        snapshot_id: format!("s{number}"),
+                        schema_version: "1.0".into(),
+                        handoff_json: "{}".into(),
+                        created_at: format!("{number}"),
+                    },
+                    "{}",
+                )
+                .await
+                .unwrap();
+        }
+        storage.maintain(1).await.unwrap();
+        assert_eq!(storage.latest_handoff("g").await.unwrap().unwrap().id, "h4");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM state_snapshots")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(storage.maintain(1).await.unwrap().handoffs_removed, 0);
+        assert_eq!(
+            storage.list_session_records("g").await.unwrap(),
+            vec![record]
+        );
+    }
+
+    #[tokio::test]
+    async fn overview_pages_do_not_load_corrupt_payload_and_preserve_exact_order() {
+        let (_directory, storage) = test_storage().await;
+        for sequence in 0..7 {
+            storage.store_event(&event(sequence)).await.unwrap();
+        }
+        // Payload-free listing must use indexed metadata rather than deserialize a transcript.
+        sqlx::query("UPDATE native_events SET canonical_json = 'invalid payload'")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let first = storage
+            .event_overviews(None, 3, None, None, i64::MAX)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.len(), 3);
+        let next = storage
+            .event_overviews(Some(&first[2].event_id), 3, None, None, i64::MAX)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next[0].sequence, 3);
+        assert!(
+            storage
+                .event_overviews(Some("missing"), 3, None, None, i64::MAX)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
     #[tokio::test]
     async fn enables_wal_and_foreign_keys() {
         let (_directory, storage) = test_storage().await;

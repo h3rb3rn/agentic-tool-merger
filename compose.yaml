@@ -2,6 +2,9 @@ services:
   sessionmesh:
     build:
       context: .
+      args:
+        SESSIONMESH_UID: ${SESSIONMESH_RUN_UID:-10001}
+        SESSIONMESH_GID: ${SESSIONMESH_RUN_GID:-10001}
     image: sessionmesh:local
     # Match the owner of private agent stores while remaining non-root.
     user: "${SESSIONMESH_RUN_UID:-10001}:${SESSIONMESH_RUN_GID:-10001}"
@@ -12,6 +15,9 @@ services:
       SESSIONMESH_PROFILE_ROOT: /sources/home
       SESSIONMESH_PROFILE_ORIGINAL_ROOT: ${SESSIONMESH_AGENT_HOME:-${HOME}}
       CODEX_HOME: /sources/home/.codex
+      SESSIONMESH_CONVERSATION_ONLY: ${SESSIONMESH_CONVERSATION_ONLY:-true}
+      SESSIONMESH_MAINTENANCE_INTERVAL_SECS: ${SESSIONMESH_MAINTENANCE_INTERVAL_SECS:-3600}
+      SESSIONMESH_HANDOFFS_TO_KEEP: ${SESSIONMESH_HANDOFFS_TO_KEEP:-1}
     ports:
       - "${SESSIONMESH_PUBLISH_ADDRESS:-127.0.0.1}:8787:8787"
     volumes:
@@ -20,6 +26,20 @@ services:
         source: ${SESSIONMESH_AGENT_HOME:-${HOME}}
         target: /sources/home
         read_only: true
+    # Bound runtime costs independently of transcript retention.
+    mem_limit: ${SESSIONMESH_MEMORY_LIMIT:-1g}
+    memswap_limit: ${SESSIONMESH_MEMORY_LIMIT:-1g}
+    cpus: ${SESSIONMESH_CPUS:-1.0}
+    pids_limit: 128
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
 volumes:

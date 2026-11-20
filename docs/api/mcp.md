@@ -92,3 +92,14 @@ SessionMesh does not rewrite unrelated Codex settings. The project marker
 provides automatic current-context discovery at the beginning of a fresh
 session; the agent initially reads the compact resource and loads details only
 through search.
+
+## Multi-client bridge
+
+The [connector installer](../integrations/automatic-delivery.md) supports Codex,
+Claude Code, Agy, OpenCode v2, and Grok Builder, plus optional Continue.
+The shared bridge accepts `SESSIONMESH_CONTAINER` for container deployment or
+`SESSIONMESH_MCP_BINARY` with `SESSIONMESH_HOME` for native execution.
+It preserves the client workspace and defaults `SESSIONMESH_MCP_ALLOW_WRITES`
+to `false`; set it explicitly in the trusted host environment to allow writes.
+Run `scripts/check-sessionmesh-mcp` from the project to verify negotiation,
+the tool catalog, and handoff delivery without printing private context.

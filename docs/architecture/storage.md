@@ -16,7 +16,7 @@ flowchart LR
     events["Idempotent canonical events"]
     cursor["Ingestion cursor"]
 
-    source --> hash --> blob --> transaction
+    source --> hash --> transaction --> blob
     transaction --> raw
     transaction --> events
     transaction --> cursor
@@ -24,8 +24,8 @@ flowchart LR
 
 Blob publication uses a uniquely created temporary file, flushes and
 synchronizes its contents, and then renames it to its deterministic address.
-Existing content is verified before reuse. SQLite metadata, normalized events,
-and the corresponding ingestion cursor commit in one transaction. A failed
+Existing content is verified before reuse. Blob publication occurs under the shared SQLite writer lock; metadata,
+normalized events, and the ingestion cursor commit in that transaction. A failed
 batch therefore cannot advertise progress beyond visible events.
 
 The write path above is shared by local (in-process) ingestion and network
@@ -63,11 +63,26 @@ stable raw record.
 
 ## Retention boundaries
 
-Native stores remain outside SessionMesh retention. Removing SessionMesh state
-never removes a native session. Raw objects and normalized events must retain
-their provenance together; a future retention policy may delete only explicitly
-selected, unreferenced derived data. Handoffs and vector indexes are
-reconstructable derivatives and must never replace raw evidence.
+Native stores remain outside SessionMesh retention. Under
+[ADR-011](../adr/011-conversation-retention-and-bounded-resources.md), the daemon
+now defaults to permanent conversation evidence and disposal of separate tool
+bodies. Retained raw content and canonical identities remain immutable. A raw
+record shared with any protected event remains in full.
+
+Maintenance commits event/raw metadata deletion before unlinking unreferenced
+blobs. A durable queue makes interrupted unlink work recoverable. Publishers
+and collectors use the same SQLite immediate-write lock to prevent deletion
+races. Unqueued orphans are streamed from the blob directory with a 24-hour
+grace period; references are rechecked under the writer lock.
+
+Migration 0005 adds a persistent shared policy, a deletion queue, exact-order
+payload-free projections, content-only FTS, and an explicit integer ingestion
+key stable across `VACUUM`. Backfill uses bounded batches and a completion
+marker, so MCP startup does not rescan the archive. The pool has at most three
+connections, each with an 8 MiB SQLite page-cache target.
+
+See [resource management](../operations/resource-management.md) for retained
+categories, cleanup schedules, limits, inspection and recovery procedures.
 
 ## Backup and restore
 

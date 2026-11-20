@@ -14,7 +14,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates crates
 COPY fixtures fixtures
 COPY migrations migrations
-RUN cargo build --locked --release --package sessionmesh-daemon --package sessionmesh-mcp
+RUN cargo build --locked --jobs 2 --release --package sessionmesh-daemon --package sessionmesh-mcp --package sessionmesh-cli
 
 FROM debian:bookworm-slim AS runtime
 ARG SESSIONMESH_UID=10001
@@ -27,6 +27,7 @@ RUN groupadd --gid "${SESSIONMESH_GID}" sessionmesh \
       --home-dir /var/lib/sessionmesh --no-create-home sessionmesh
 COPY --from=rust-builder /build/target/release/sessionmesh-daemon /usr/local/bin/sessionmesh-daemon
 COPY --from=rust-builder /build/target/release/sessionmesh-mcp /usr/local/bin/sessionmesh-mcp
+COPY --from=rust-builder /build/target/release/sessionmesh /usr/local/bin/sessionmesh
 COPY --from=web-builder /build/apps/web/dist /usr/share/sessionmesh/web
 ENV SESSIONMESH_HOME=/var/lib/sessionmesh
 RUN install -d -m 0700 -o sessionmesh -g sessionmesh /var/lib/sessionmesh

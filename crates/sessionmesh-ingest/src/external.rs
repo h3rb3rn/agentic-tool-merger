@@ -12,7 +12,7 @@ use sessionmesh_storage::{
     CursorRepository, IngestionBatch, IngestionCursor, RawObject, Storage, StorageError,
 };
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncSeekExt as _};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
 
 /// Supported read-only external session formats.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,6 +56,8 @@ pub struct ExternalSource {
 /// Result of an external snapshot scan.
 #[derive(Clone, Debug)]
 pub struct ExternalImport {
+    /// Whether this batch reached the observed file end (snapshot imports always do).
+    pub caught_up: bool,
     /// Whether a changed snapshot committed.
     pub changed: bool,
     /// Newly interpreted events, including idempotent replays.
@@ -131,13 +133,17 @@ pub async fn ingest_external(
     let prior = storage.get_cursor(&source_id).await?;
     let Some(batch) = prepare_external(source, imported_at, prior.as_ref()).await? else {
         return Ok(ExternalImport {
+            caught_up: true,
             changed: false,
             events: Vec::new(),
         });
     };
+    let caught_up = source.tool == ExternalTool::Continue
+        || batch.cursor.byte_offset >= tokio::fs::metadata(&source.path).await?.len();
     let events = batch.events.clone();
     storage.commit_batch(&batch, None).await?;
     Ok(ExternalImport {
+        caught_up,
         changed: true,
         events,
     })
@@ -159,8 +165,8 @@ pub async fn prepare_external(
     imported_at: &str,
     prior_cursor: Option<&IngestionCursor>,
 ) -> Result<Option<IngestionBatch>, ExternalError> {
-    if source.tool == ExternalTool::ClaudeCode {
-        return prepare_claude_append(source, imported_at, prior_cursor).await;
+    if matches!(source.tool, ExternalTool::ClaudeCode | ExternalTool::Agy) {
+        return prepare_jsonl_append(source, imported_at, prior_cursor).await;
     }
     let metadata = tokio::fs::metadata(&source.path).await?;
     let source_id = external_source_id(source);
@@ -189,7 +195,14 @@ pub async fn prepare_external(
         ExternalTool::Continue => {
             parse_continue(&bytes, source, &stable_generation, &fallback_timestamp)?
         }
-        ExternalTool::Agy => parse_agy(&bytes, source, &stable_generation, &fallback_timestamp)?,
+        ExternalTool::Agy => parse_agy(
+            &bytes,
+            source,
+            &stable_generation,
+            &fallback_timestamp,
+            0,
+            0,
+        )?,
     };
     let events = parsed
         .iter()
@@ -226,7 +239,7 @@ pub async fn prepare_external(
     }))
 }
 
-/// Prepares an append-only Claude Code transcript for incremental import.
+/// Prepares append-only Claude or Agy JSONL in bounded newline batches.
 ///
 /// Claude transcripts only grow, so the cursor remembers the byte offset of the
 /// last complete line and its next event sequence; each pass reads and parses
@@ -234,7 +247,7 @@ pub async fn prepare_external(
 /// until its newline arrives. A shrunken file or a different first line means
 /// the transcript was truncated or replaced, so it is reread from the start;
 /// deterministic event and raw-object IDs keep that replay idempotent.
-async fn prepare_claude_append(
+async fn prepare_jsonl_append(
     source: &ExternalSource,
     imported_at: &str,
     prior_cursor: Option<&IngestionCursor>,
@@ -254,10 +267,7 @@ async fn prepare_claude_append(
         return Ok(None);
     }
 
-    let mut file = tokio::fs::File::open(&source.path).await?;
-    file.seek(std::io::SeekFrom::Start(start_offset)).await?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).await?;
+    let mut bytes = crate::chunk::read_chunk(&source.path, start_offset).await?;
     let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
         return Ok(None);
     };
@@ -271,14 +281,25 @@ async fn prepare_claude_append(
             |_| imported_at.to_owned(),
             |timestamp| timestamp.to_rfc3339(),
         );
-    let parsed = parse_claude(
-        &bytes,
-        source,
-        &stable_generation,
-        &fallback_timestamp,
-        start_offset,
-        start_sequence,
-    )?;
+    let parsed = if source.tool == ExternalTool::ClaudeCode {
+        parse_claude(
+            &bytes,
+            source,
+            &stable_generation,
+            &fallback_timestamp,
+            start_offset,
+            start_sequence,
+        )?
+    } else {
+        parse_agy(
+            &bytes,
+            source,
+            &stable_generation,
+            &fallback_timestamp,
+            start_offset,
+            start_sequence,
+        )?
+    };
     let next_sequence = start_sequence.saturating_add(u64::try_from(parsed.len()).unwrap_or(0));
     let events = parsed
         .iter()
@@ -356,7 +377,7 @@ fn parse_claude(
             continue;
         };
         let native_type = value.get("type").and_then(serde_json::Value::as_str);
-        let kind = match native_type {
+        let mut kind = match native_type {
             Some("user") => EventKind::UserMessage,
             Some("assistant") => EventKind::AssistantMessage,
             _ => continue,
@@ -376,6 +397,27 @@ fn parse_claude(
                 .get("message")
                 .and_then(|message| message.get("content")),
         );
+        if let Some(parts) = value
+            .pointer("/message/content")
+            .and_then(serde_json::Value::as_array)
+        {
+            let pure_tools = !parts.is_empty()
+                && parts.iter().all(|part| {
+                    matches!(
+                        part.get("type").and_then(serde_json::Value::as_str),
+                        Some("tool_use" | "tool_result")
+                    )
+                });
+            if pure_tools {
+                kind = if parts.iter().any(|part| {
+                    part.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+                }) {
+                    EventKind::ToolResult
+                } else {
+                    EventKind::ToolCall
+                };
+            }
+        }
         let mut payload = BTreeMap::new();
         payload.insert("text".to_owned(), serde_json::Value::String(text));
         let workspace = value
@@ -478,9 +520,11 @@ fn parse_agy(
     source: &ExternalSource,
     generation: &str,
     fallback_timestamp: &str,
+    base_offset: u64,
+    base_sequence: u64,
 ) -> Result<Vec<ParsedRecord>, ExternalError> {
     let mut records = Vec::new();
-    let mut offset = 0_u64;
+    let mut offset = base_offset;
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
         let start = offset;
         offset = offset.saturating_add(u64::try_from(line.len()).unwrap_or(u64::MAX));
@@ -525,7 +569,7 @@ fn parse_agy(
             event: event(
                 source,
                 &format!("agy:{conversation_id}"),
-                u64::try_from(records.len()).unwrap_or(u64::MAX),
+                base_sequence.saturating_add(u64::try_from(records.len()).unwrap_or(u64::MAX)),
                 &timestamp,
                 EventKind::UserMessage,
                 workspace,
@@ -724,6 +768,90 @@ mod tests {
     use sessionmesh_storage::EventRepository;
 
     use super::*;
+
+    #[tokio::test]
+    async fn conversation_policy_preserves_mixed_reasoning_and_text_envelopes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mixed.jsonl");
+        let pure = r#"{"type":"user","sessionId":"s","message":{"content":[{"type":"tool_result","content":"code dump"}]}}"#;
+        let thinking = r#"{"type":"assistant","sessionId":"s","message":{"content":[{"type":"thinking","thinking":"preserve reasoning"},{"type":"tool_use","input":{"code":"v1"}}]}}"#;
+        let text = r#"{"type":"assistant","sessionId":"s","message":{"content":[{"type":"text","text":"preserve AI code reply"},{"type":"tool_use","input":{"code":"v2"}}]}}"#;
+        std::fs::write(&path, format!("{pure}\n{thinking}\n{text}\n")).unwrap();
+        let storage = Storage::open_with_retention(
+            directory.path().join("state.db"),
+            directory.path().join("blobs"),
+            true,
+        )
+        .await
+        .unwrap();
+        let source = ExternalSource {
+            tool: ExternalTool::ClaudeCode,
+            path: path.clone(),
+            original_path: path,
+        };
+        let imported = ingest_external(&storage, &source, "2026-07-22T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(imported.events[0].kind, EventKind::ToolResult);
+        assert_eq!(imported.events[1].kind, EventKind::AssistantMessage);
+        assert_eq!(imported.events[2].kind, EventKind::AssistantMessage);
+        storage.maintain(1).await.unwrap();
+        assert_eq!(storage.event_count().await.unwrap(), 2);
+        assert_eq!(
+            storage
+                .get_canonical_event(imported.events[1].event_id.as_str())
+                .await
+                .unwrap(),
+            Some(imported.events[1].clone())
+        );
+        assert_eq!(
+            storage
+                .get_canonical_event(imported.events[2].event_id.as_str())
+                .await
+                .unwrap(),
+            Some(imported.events[2].clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn agy_history_resumes_append_without_reloading_prior_prompts() {
+        use std::io::Write as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.jsonl");
+        std::fs::write(
+            &path,
+            "{\"conversationId\":\"c\",\"display\":\"first\",\"timestamp\":1784678400000}\n",
+        )
+        .unwrap();
+        let source = ExternalSource {
+            tool: ExternalTool::Agy,
+            path: path.clone(),
+            original_path: path.clone(),
+        };
+        let storage = Storage::open(
+            directory.path().join("state.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .unwrap();
+        ingest_external(&storage, &source, "2026-07-22T00:00:00Z")
+            .await
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(
+                b"{\"conversationId\":\"c\",\"display\":\"second\",\"timestamp\":1784678401000}\n",
+            )
+            .unwrap();
+        let imported = ingest_external(&storage, &source, "2026-07-22T00:01:00Z")
+            .await
+            .unwrap();
+        assert_eq!(imported.events.len(), 1);
+        assert_eq!(imported.events[0].sequence, 1);
+        assert_eq!(storage.event_count().await.unwrap(), 2);
+    }
 
     #[tokio::test]
     async fn imports_claude_and_continue_idempotently_with_workspace_context() {

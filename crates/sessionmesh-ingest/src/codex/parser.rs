@@ -68,11 +68,31 @@ pub struct ParsedRecord {
 /// records from being interpreted.
 #[must_use]
 pub fn parse_rollout(bytes: &[u8], context: &CodexParseContext) -> Vec<ParsedRecord> {
+    parse_rollout_seeded(bytes, context, &[])
+}
+
+/// Seeds native session metadata without re-emitting the header at every append.
+pub(super) fn parse_rollout_seeded(
+    bytes: &[u8],
+    context: &CodexParseContext,
+    header: &[u8],
+) -> Vec<ParsedRecord> {
     let mut state = ParserState {
         session_id: context.fallback_session_id.clone(),
         workspace: None,
         tool_calls: HashSet::new(),
     };
+    if !header.is_empty() {
+        let _ = parse_record(
+            RawRolloutRecord {
+                source_offset: 0,
+                line_number: 1,
+                bytes: header.to_vec(),
+            },
+            context,
+            &mut state,
+        );
+    }
     let mut offset = context.base_offset;
     let mut line_number = context.first_native_sequence.saturating_add(1);
     bytes

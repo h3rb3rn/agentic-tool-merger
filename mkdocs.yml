@@ -61,6 +61,9 @@ nav:
           - ADR-008 Automatic Context Sync: adr/008-sync-derived-context-not-native-transcripts.md
           - ADR-009 Event Chronology: adr/009-chronology-uses-multiple-ordering-signals.md
           - ADR-010 Incremental Derived State: adr/010-derived-state-is-maintained-incrementally.md
+          - ADR-011 Retention and Resources: adr/011-conversation-retention-and-bounded-resources.md
+  - Operations:
+      - Resource Management: operations/resource-management.md
   - Development:
       - Engineering Standards: development/engineering-standards.md
       - Configuration: development/configuration.md

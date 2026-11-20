@@ -1776,6 +1776,7 @@ dependencies = [
  "sessionmesh-handoff",
  "sessionmesh-storage",
  "sha2 0.11.0",
+ "sqlx",
  "tempfile",
  "tokio",
 ]
@@ -1785,7 +1786,9 @@ name = "sessionmesh-storage"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "getrandom 0.3.4",
+ "serde_json",
  "sessionmesh-core",
  "sha2 0.11.0",
  "sqlx",

@@ -61,3 +61,18 @@ provenance.
 snapshot and handoff. `GET` returns the latest immutable version. Both require
 the local bearer token. The content hash is the snapshot identity, so repeated
 generation from equal evidence is idempotent.
+
+## Bounded active context
+
+The API selects the latest 256 events with a 4 MiB context target, retaining a
+single larger event intact, plus the latest 128 typed observations. The
+original thread objective is preserved separately. Messages and older typed
+observations remain in the durable store; dropping them from the active context
+window does not delete them. Historical canonical events are retrieved through search; older typed
+observations remain stored outside the active handoff window.
+
+Maintenance retains the latest handoff/snapshot per global session by default.
+A cleanup revision causes automatic regeneration after tool history is removed,
+without waiting for another message. See
+[ADR-011](../adr/011-conversation-retention-and-bounded-resources.md) and
+[resource management](../operations/resource-management.md).

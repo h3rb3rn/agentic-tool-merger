@@ -26,18 +26,18 @@ flowchart LR
 
 ## Boundaries and controls
 
-| Boundary          | Primary threats                                         | Controls                                                              |
-| ----------------- | ------------------------------------------------------- | --------------------------------------------------------------------- |
-| Native paths      | Modification, traversal, symlink aliasing               | Read-only opens/mounts, canonical identity, no native write API       |
-| JSON/JSONL        | Malformed lines, huge partial records, injection text   | Record isolation, bounded cursors, data-only diagnostics              |
-| SQLite/blob store | Partial commit, tampering, broad permissions            | WAL transaction, content hashes, `0600` files, `0700` directories     |
-| Local HTTP        | Other-origin reads/writes, secret listing, remote bind  | Loopback default, bearer token, safe projections, explicit opt-in     |
+| Boundary          | Primary threats                                                                                                               | Controls                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Native paths      | Modification, traversal, symlink aliasing                                                                                     | Read-only opens/mounts, canonical identity, no native write API                                                                                                                                                                                                                                                                                                                                                                     |
+| JSON/JSONL        | Malformed lines, huge partial records, injection text                                                                         | Record isolation, bounded cursors, data-only diagnostics                                                                                                                                                                                                                                                                                                                                                                            |
+| SQLite/blob store | Partial commit, tampering, broad permissions                                                                                  | WAL transaction, content hashes, `0600` files, `0700` directories                                                                                                                                                                                                                                                                                                                                                                   |
+| Local HTTP        | Other-origin reads/writes, secret listing, remote bind                                                                        | Loopback default, bearer token, safe projections, explicit opt-in                                                                                                                                                                                                                                                                                                                                                                   |
 | Network ingestion | Forged events/raw objects, stolen or replayed collector token, oversized or high-rate batches, cross-host workspace confusion | TLS-only listener separate from the local API, per-collector revocable bearer token (never the local UI/MCP token), server-side event-ID and raw-object content-hash re-verification (a collector cannot forge either), configured batch size/event-count limits, per-collector rate limiting, a full accept/reject audit log, and correlation that treats an identical `cwd` from two different origins as two workspaces, not one |
-| Raw/detail UI     | Accidental prompt, output, or credential disclosure     | No preload, explicit warning/reveal, tab-scoped token                 |
-| MCP stdio         | Unauthorized writes, scope escape, duplicate mutation   | Host process opt-in, strict schemas, current-scope check, request IDs |
-| Model endpoint    | Secret egress, timeout, malformed or adversarial output | Redaction, network opt-in, timeout, strict JSON, fallback only        |
-| Derived context   | Handoff ingestion loops, instruction smuggling          | Origin/version marker, ingestion exclusion, observation typing        |
-| Adapter processes | Arbitrary scripts, unbounded output                     | Versioned protocol, explicit approval, bounded messages               |
+| Raw/detail UI     | Accidental prompt, output, or credential disclosure                                                                           | No preload, explicit warning/reveal, tab-scoped token                                                                                                                                                                                                                                                                                                                                                                               |
+| MCP stdio         | Unauthorized writes, scope escape, duplicate mutation                                                                         | Host process opt-in, strict schemas, current-scope check, request IDs                                                                                                                                                                                                                                                                                                                                                               |
+| Model endpoint    | Secret egress, timeout, malformed or adversarial output                                                                       | Redaction, network opt-in, timeout, strict JSON, fallback only                                                                                                                                                                                                                                                                                                                                                                      |
+| Derived context   | Handoff ingestion loops, instruction smuggling                                                                                | Origin/version marker, ingestion exclusion, observation typing                                                                                                                                                                                                                                                                                                                                                                      |
+| Adapter processes | Arbitrary scripts, unbounded output                                                                                           | Versioned protocol, explicit approval, bounded messages                                                                                                                                                                                                                                                                                                                                                                             |
 
 ## Residual risks
 
@@ -66,3 +66,20 @@ Release validation verifies loopback publishing, non-root OCI execution,
 read-only source mounts, user-only state permissions, token exclusion from
 Git, payload-free list responses, prompt-injection classification, malformed
 input isolation, and byte-for-byte native-source preservation.
+
+## Resource exhaustion and retention
+
+Bounded import/read/context windows, connection-cache targets, cgroup limits
+and rotated logs constrain derived resource growth. Complete conversation
+retention still requires disk space proportional to actual messages, and a
+single large record or Continue snapshot can exceed ordinary working-set
+estimates. Unknown records are conservatively retained to protect messages.
+
+Cleanup acts only on SessionMesh-owned metadata/blobs and obsolete derived
+contexts. Native transcripts, project repositories, user observations and
+membership audit records remain outside its deletion policy. A committed
+metadata phase, durable unlink queue, basename validation, writer serialization,
+reference checks and a 24-hour orphan grace period protect against collection
+races and accidental path traversal. Full database compaction is explicit and
+requires temporary disk space; cleanup never deletes active SQLite WAL files.
+See [resource management](../operations/resource-management.md).

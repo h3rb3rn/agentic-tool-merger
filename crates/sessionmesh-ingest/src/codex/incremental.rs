@@ -11,9 +11,9 @@ use sessionmesh_storage::{
     CursorRepository, IngestionBatch, IngestionCursor, RawObject, Storage, StorageError,
 };
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-use super::parser::{CodexParseContext, ParseIssue, parse_rollout};
+use super::parser::{CodexParseContext, ParseIssue, parse_rollout_seeded};
 
 /// Immutable metadata needed to prepare one scan.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,7 +66,7 @@ pub async fn prepare_incremental(
     prior: Option<&IngestionCursor>,
 ) -> Result<PreparedIncremental, std::io::Error> {
     let metadata = tokio::fs::metadata(&input.source_path).await?;
-    let generation = source_generation(&input.source_path, &metadata).await?;
+    let (generation, header) = source_generation(&input.source_path, &metadata).await?;
     let size = metadata.len();
     let (mut start, mut next_sequence, mut reset) = resume_position(prior, &generation, size);
     let mut bytes = read_after(&input.source_path, start).await?;
@@ -98,7 +98,7 @@ pub async fn prepare_incremental(
         fallback_session_id: input.fallback_session_id.clone(),
         first_ingestion_sequence: next_sequence,
     };
-    let parsed = parse_rollout(complete, &parser_context);
+    let parsed = parse_rollout_seeded(complete, &parser_context, &header);
     let completed_records = u64::try_from(parsed.len()).unwrap_or(u64::MAX);
     let confirmed_bytes = u64::try_from(complete_length).unwrap_or(u64::MAX);
     let modified = modified_label(&metadata);
@@ -321,18 +321,14 @@ fn resume_position(
 }
 
 async fn read_after(path: &Path, offset: u64) -> Result<Vec<u8>, std::io::Error> {
-    let mut file = tokio::fs::File::open(path).await?;
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).await?;
-    Ok(bytes)
+    crate::chunk::read_chunk(path, offset).await
 }
 
 async fn source_generation(
     path: &Path,
     metadata: &std::fs::Metadata,
-) -> Result<String, std::io::Error> {
-    let mut reader = BufReader::new(tokio::fs::File::open(path).await?);
+) -> Result<(String, Vec<u8>), std::io::Error> {
+    let mut reader = BufReader::new(tokio::fs::File::open(path).await?.take(1024 * 1024));
     let mut first_record = Vec::new();
     reader.read_until(b'\n', &mut first_record).await?;
     if first_record.last() != Some(&b'\n') {
@@ -342,7 +338,7 @@ async fn source_generation(
     hasher.update(metadata_identity(metadata));
     hasher.update(first_record.len().to_be_bytes());
     hasher.update(&first_record);
-    Ok(prefixed_digest(hasher.finalize()))
+    Ok((prefixed_digest(hasher.finalize()), first_record))
 }
 
 #[cfg(unix)]
@@ -446,6 +442,22 @@ mod tests {
             .expect("source should open for fixture append")
             .write_all(bytes)
             .expect("fixture append should work");
+    }
+
+    #[tokio::test]
+    async fn bounded_append_keeps_the_native_header_identity_and_workspace() {
+        let (_directory, storage, input) = setup().await;
+        let first = ingest_file(&storage, &input).await.unwrap();
+        append(&input.source_path, MESSAGE);
+        let next = ingest_file(&storage, &input).await.unwrap();
+        assert_eq!(
+            next.batch.events[0].native_session_id,
+            first.batch.events[0].native_session_id
+        );
+        assert_eq!(
+            next.batch.events[0].workspace,
+            first.batch.events[0].workspace
+        );
     }
 
     #[tokio::test]

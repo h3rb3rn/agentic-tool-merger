@@ -5,6 +5,36 @@ changes to SessionMesh are recorded here.
 
 ## Unreleased
 
+### Resource management
+
+- Updated compatible transitive runtime dependencies to Seroval 1.8.2 and
+  seroval-plugins 1.8.0. The publication-time production dependency audit reports
+  no known vulnerabilities; outstanding development/build-tool advisories are
+  tracked separately in the implementation ledger.
+
+- Compose now aligns image/state-directory ownership with the configured runtime
+  UID/GID. Rust image builds use two compilation jobs to limit build-time
+  parallelism.
+
+- Default daemon retention now preserves complete prompts/AI replies and shared
+  raw evidence, while excluding separate tool/code bodies. Scheduled maintenance
+  cleans historical tool dumps, verified legacy Claude tool-only envelopes,
+  unreferenced blobs and superseded contexts. Retained data remains immutable;
+  native stores and durable user/audit records are never cleaned.
+- Replaced whole-transcript API/SSE loads with indexed metadata pages and SQL
+  session aggregates. Bounded active context, correlation caches, Codex/Claude/
+  Agy ingestion, and OpenCode continuation pages prevent work from scaling with
+  the entire archive. Full conversation text remains available on demand.
+- Added migration 0005, stable ingestion keys, content-only FTS, shared retention
+  settings, recoverable blob collection, SQLite page-cache targets and optional
+  manual database compaction. The daemon rebuilds contexts after cleanup even
+  without new messages.
+- Added `sessionmesh maintenance [--apply [--vacuum]]`, included in the image,
+  resource settings, a reproducible synthetic soak, and operational guidance.
+- Compose now defaults to 1 GiB memory without extra swap, one CPU, 128 process
+  IDs, a read-only root, bounded temporary space and rotated logs. See ADR-011
+  and the resource-management guide before upgrading an existing database.
+
 ### Performance
 
 - Reconciliation is now incremental (ADR-010). It detects new activity with a
@@ -23,6 +53,17 @@ changes to SessionMesh are recorded here.
   because their cursor identity changed; replays are idempotent.
 
 ### Changed
+
+- MCP connector installation now selects Codex, Claude Code, Agy, OpenCode v2,
+  and Grok Builder independently; Continue is optional. Added a write-free
+  preview, original private backups, preservation of existing instructions and
+  unrelated startup hooks, and OpenCode v2 CLI preflight.
+- The stdio bridge accepts an explicit container or native binary/state home.
+  Typed MCP writes now require explicit host opt-in instead of being enabled
+  unconditionally.
+- Added a bounded MCP negotiation/tool/handoff check that hides private content.
+  Startup injection retains origin metadata and reports unavailable handoffs
+  instead of silently succeeding. Documented the local missing-runtime audit.
 
 - Decoupled the daemon's cheap file discovery/incremental-ingest scan from
   the expensive cross-tool correlation and handoff reconciliation pass; the

@@ -65,3 +65,21 @@ Remaining limits:
   SQLite FTS5 stores a full copy of each canonical event.
 - Continue and Agy snapshot files are reread in full when they change.
 - Handoff snapshots are immutable and are not pruned.
+
+## Resource-management verification — 2026-11-20
+
+The new Linux synthetic soak reported a warm daemon RSS of 63,896 KiB and a
+steady range of 63,912–63,928 KiB over 70 seconds and 1,284 API requests,
+with a slow SSE client and concurrent imports. It retained all 728 expected
+conversation events, discarded separate tool-result bodies, and retained one
+current handoff. Fixture input was 27,966,755 bytes; state including WAL/blobs
+was 7,600,177 bytes at measurement time. Native source hashes and message
+contents were verified. Earlier successful fixture runs varied in allocator
+high-water mark; these numbers describe this run, not a universal RSS bound.
+
+This native short soak does not measure multi-day production behavior, Docker
+cgroup accounting, all MCP clients concurrently, or Podman. The former service
+and production volume were absent. See the
+[resource-management guide](../operations/resource-management.md) for the
+reproduction command, retained categories, cleanup/compaction requirements and
+remaining per-record/snapshot costs.

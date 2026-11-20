@@ -1,79 +1,247 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env python3
+"""Install selected user-scoped MCP connectors without touching transcripts."""
 
-repository_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-mcp_bridge="$repository_root/scripts/sessionmesh-mcp-stdio"
-session_hook="$repository_root/scripts/sessionmesh-session-start"
-instruction="$repository_root/connectors/sessionmesh-agent-instruction.md"
-codex_home=${CODEX_HOME:-"$HOME/.codex"}
-claude_home=${CLAUDE_CONFIG_DIR:-"$HOME/.claude"}
-continue_home=${CONTINUE_HOME:-"$HOME/.continue"}
+import argparse
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Callable
 
-for command in codex claude jq yq docker; do
-  command -v "$command" >/dev/null 2>&1 || {
-    printf 'required command is unavailable: %s\n' "$command" >&2
-    exit 1
-  }
-done
+ROOT = Path(__file__).resolve().parent.parent
+BRIDGE = str(ROOT / "scripts/sessionmesh-mcp-stdio")
+HOOK = str(ROOT / "scripts/sessionmesh-session-start")
+CLIENTS = ("codex", "claude", "agy", "opencode", "grok", "continue")
 
-codex mcp get sessionmesh >/dev/null 2>&1 && codex mcp remove sessionmesh >/dev/null
-codex mcp add sessionmesh -- "$mcp_bridge"
 
-claude mcp get sessionmesh >/dev/null 2>&1 \
-  && claude mcp remove --scope user sessionmesh >/dev/null
-claude mcp add --scope user sessionmesh -- "$mcp_bridge"
+def backup(path: Path) -> None:
+    """Retain the original configuration once, with private backup permissions."""
+    target = Path(str(path) + ".sessionmesh-backup")
+    if path.exists() and not target.exists():
+        with target.open("xb") as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(path.read_bytes())
 
-mkdir -p "$codex_home" "$claude_home" "$continue_home"
-if [ ! -e "$codex_home/AGENTS.md" ]; then
-  install -m 0600 "$instruction" "$codex_home/AGENTS.md"
-elif grep -q '^# SessionMesh shared context$' "$codex_home/AGENTS.md"; then
-  install -m 0600 "$instruction" "$codex_home/AGENTS.md"
-elif ! grep -q 'sessionmesh_get_handoff' "$codex_home/AGENTS.md"; then
-  printf '%s\n' 'Codex AGENTS.md already exists; add the SessionMesh instruction manually.' >&2
-  exit 1
-fi
 
-claude_settings="$claude_home/settings.json"
-if [ ! -e "$claude_settings" ]; then
-  printf '{}\n' >"$claude_settings"
-  chmod 0600 "$claude_settings"
-fi
-if [ ! -e "$claude_settings.sessionmesh-backup" ]; then
-  cp -p "$claude_settings" "$claude_settings.sessionmesh-backup"
-fi
-temporary=$(mktemp "$claude_home/.settings.sessionmesh.XXXXXX")
-jq --arg command "$session_hook" '
-  .hooks.SessionStart = (
-    (.hooks.SessionStart // [])
-    | map(select(any(.hooks[]?; .command == $command) | not))
-    + [{
-        matcher: "startup|resume|clear|compact",
-        hooks: [{type: "command", command: $command, timeout: 30}]
-      }]
-  )
-' "$claude_settings" >"$temporary"
-chmod --reference="$claude_settings" "$temporary"
-mv "$temporary" "$claude_settings"
+def atomic_write(path: Path, text: str) -> None:
+    """Replace a configuration atomically after securing its original backup."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup(path)
+    descriptor, temporary = tempfile.mkstemp(prefix=".sessionmesh-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            output.write(text)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
-continue_config="$continue_home/config.yaml"
-test -f "$continue_config" || {
-  printf 'Continue configuration is unavailable: %s\n' "$continue_config" >&2
-  exit 1
-}
-if [ ! -e "$continue_config.sessionmesh-backup" ]; then
-  cp -p "$continue_config" "$continue_config.sessionmesh-backup"
-fi
-yq --in-place --yaml-output --arg command "$mcp_bridge" '
-  .mcpServers = (
-    (.mcpServers // [])
-    | map(select(.name != "SessionMesh"))
-    + [{name: "SessionMesh", command: $command}]
-  )
-  | .rules = (
-    (.rules // [])
-    | map(select(. != "At the beginning of agent work, call sessionmesh_get_handoff and verify its historical facts before acting."))
-    + ["At the beginning of agent work, call sessionmesh_get_handoff and verify its historical facts before acting."]
-  )
-' "$continue_config"
 
-printf '%s\n' 'SessionMesh connectors installed for Codex, Claude Code, and Continue.'
+def update_json(path: Path, transform: Callable[[dict], dict]) -> None:
+    """Validate JSON before applying a focused, non-destructive transformation."""
+    data = json.loads(path.read_text()) if path.exists() else {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a JSON object: {path}")
+    updated = transform(data)
+    if updated != data or not path.exists():
+        atomic_write(path, json.dumps(updated, indent=2) + "\n")
+
+
+def install_instruction(path: Path) -> None:
+    """Append the startup instruction once, preserving all existing user rules."""
+    existing = path.read_text() if path.exists() else ""
+    if "sessionmesh_get_handoff" not in existing:
+        instruction = (ROOT / "connectors/sessionmesh-agent-instruction.md").read_text()
+        atomic_write(
+            path, existing.rstrip() + ("\n\n" if existing else "") + instruction
+        )
+
+
+def registration(client: str, bridge: str) -> list[str]:
+    """Use each installed client's supported user registration command."""
+    if client == "claude":
+        return ["claude", "mcp", "add", "--scope", "user", "sessionmesh", "--", bridge]
+    if client == "grok":
+        return ["grok", "mcp", "add", "--scope", "user", "sessionmesh", "--", bridge]
+    if client == "agy":
+        return ["agy", "mcp", "add", "sessionmesh", bridge]
+    if client == "opencode":
+        return ["opencode", "mcp", "add", "--global", "sessionmesh", "--", bridge]
+    return ["codex", "mcp", "add", "sessionmesh", "--", bridge]
+
+
+def executable(client: str) -> str | None:
+    """Also recognize OpenCode's official installation directory off PATH."""
+    found = shutil.which(client)
+    candidate = Path.home() / ".opencode/bin/opencode"
+    if not found and client == "opencode" and os.access(candidate, os.X_OK):
+        return str(candidate)
+    return found
+
+
+def claude_hook(data: dict) -> dict:
+    """Upsert our hook while preserving unrelated hook groups and settings."""
+    data = json.loads(json.dumps(data))
+    hooks = data.setdefault("hooks", {})
+    groups = []
+    for group in hooks.get("SessionStart", []):
+        retained = [
+            hook
+            for hook in group.get("hooks", [])
+            if hook.get("command") not in {HOOK, shlex.quote(HOOK)}
+        ]
+        if retained:
+            groups.append({**group, "hooks": retained})
+    groups.append(
+        {
+            "matcher": "startup|resume|clear|compact",
+            "hooks": [{"type": "command", "command": shlex.quote(HOOK), "timeout": 30}],
+        }
+    )
+    hooks["SessionStart"] = groups
+    return data
+
+
+def install_continue(path: Path) -> None:
+    """Preserve the existing optional Continue YAML integration via jq-style yq."""
+    expression = """.mcpServers = ((.mcpServers // []) | map(select(.name != "SessionMesh"))
+      + [{name: "SessionMesh", command: $command}])
+      | .rules = ((.rules // []) | map(select(. != $rule)) + [$rule])"""
+    rule = "At the beginning of agent work, call sessionmesh_get_handoff and verify its historical facts before acting."
+    result = subprocess.run(
+        [
+            "yq",
+            "--yaml-output",
+            "--arg",
+            "command",
+            BRIDGE,
+            "--arg",
+            "rule",
+            rule,
+            expression,
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    atomic_write(path, result.stdout)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Preflight selected clients, then install; dry runs do not launch clients."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the installation plan without writes or client launches",
+    )
+    parser.add_argument(
+        "clients",
+        nargs="*",
+        help="Clients: " + ", ".join(CLIENTS) + "; default: installed clients",
+    )
+    args = parser.parse_args(argv)
+    if any(client not in CLIENTS for client in args.clients):
+        parser.error("Unknown client; choose from: " + ", ".join(CLIENTS))
+    selected = (
+        list(dict.fromkeys(args.clients))
+        if args.clients
+        else [client for client in CLIENTS[:-1] if executable(client)]
+    )
+    if not selected:
+        parser.error("No supported clients found")
+    home = Path.home()
+    codex_home = Path(os.environ.get("CODEX_HOME", home / ".codex"))
+    claude_home = Path(os.environ.get("CLAUDE_CONFIG_DIR", home / ".claude"))
+    continue_path = (
+        Path(os.environ.get("CONTINUE_HOME", home / ".continue")) / "config.yaml"
+    )
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+    configs = {
+        "codex": codex_home / "config.toml",
+        "claude": (
+            claude_home / ".claude.json"
+            if "CLAUDE_CONFIG_DIR" in os.environ
+            else home / ".claude.json"
+        ),
+        "agy": home / ".gemini/config/mcp_config.json",
+        "opencode": config_home / "opencode/opencode.json",
+        "grok": Path(os.environ.get("GROK_HOME", home / ".grok")) / "config.toml",
+    }
+    if args.dry_run:
+        for client in selected:
+            print(
+                "Plan:",
+                (
+                    "update " + str(continue_path)
+                    if client == "continue"
+                    else shlex.join(registration(client, BRIDGE))
+                ),
+            )
+        print(
+            "Codex: append startup instruction; Claude: preserve settings and upsert SessionStart hook."
+        )
+        print(
+            "Agy, OpenCode, Grok: MCP registration; request sessionmesh_get_handoff in the first prompt."
+        )
+        return
+    # Complete dependency and format checks before making the first change.
+    for client in selected:
+        if client == "continue":
+            if not shutil.which("yq") or not continue_path.is_file():
+                parser.error(
+                    "Continue requires jq-style yq and an existing config.yaml"
+                )
+        elif not executable(client):
+            parser.error(f"Required client is unavailable: {client}")
+    if "opencode" in selected:
+        help_text = subprocess.run(
+            [executable("opencode"), "mcp", "add", "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        if "--global" not in help_text:
+            parser.error(
+                "OpenCode v2 with mcp add --global is required; no settings changed"
+            )
+    if "claude" in selected:
+        settings = claude_home / "settings.json"
+        claude_hook(json.loads(settings.read_text()) if settings.exists() else {})
+    for client in selected:
+        if client == "continue":
+            install_continue(continue_path)
+            continue
+        backup(configs[client])
+        command = registration(client, BRIDGE)
+        command[0] = executable(client)
+        # Claude requires removal before replacing an existing user registration.
+        if client == "claude":
+            path = configs[client]
+            data = json.loads(path.read_text()) if path.exists() else {}
+            if "sessionmesh" in data.get("mcpServers", {}):
+                subprocess.run(
+                    [command[0], "mcp", "remove", "--scope", "user", "sessionmesh"],
+                    check=True,
+                )
+        subprocess.run(command, check=True)
+        if client == "codex":
+            install_instruction(codex_home / "AGENTS.md")
+        elif client == "claude":
+            update_json(claude_home / "settings.json", claude_hook)
+    print(
+        "Installed connectors: "
+        + ", ".join(selected)
+        + ". Restart clients and run scripts/check-sessionmesh-mcp."
+    )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise SystemExit(f"Connector installation failed: {error}")
