@@ -706,3 +706,22 @@ Other sources continue independently. A GUI regression also caught duplicate
 presentation of normalized text and its original Grok content envelope. The
 presentation now shows text once while retaining expandable canonical evidence;
 persisted event identities/content are unchanged.
+
+Final validation: all 163 Rust workspace tests/doc tests, formatting and strict
+Clippy pass. All 22 web tests and twelve repository/schema/security tests pass,
+alongside ESLint, TypeScript, production build and strict MkDocs. The feature
+branch was synchronized with remote main `32bcb95`; rebasing preserved the exact
+tested file tree. The updated image
+`sha256:0a9b330a55827fffe423b81a56d1c1e42ed5095b109f85aee61c23f469685394`
+is deployed and healthy with its existing state volume and resource limits.
+
+Authenticated production API inspection counted 152 Grok sessions and 15,046
+retained conversation chunks. A canonical assistant-detail probe verified text,
+workspace and original update-log provenance without logging contents. Headless
+Chromium navigated to a later session page, selected a Grok conversation and
+loaded all 76 visible event contents, including conversation messages, with zero
+JavaScript errors. Fresh MCP negotiation, all five tools and the current
+workspace handoff pass. The malformed native source remains blocked and is not
+reported as a successful complete archive import. A post-recreation sample used
+92.65 MiB of the 1 GiB limit; it is not a long-running memory-soak result.
+Changes are published on `feat/grok-build-import`; main is not modified.
