@@ -8,7 +8,7 @@ This page is the canonical restart and execution ledger.
 - **Active prompt:** None
 - **Next prompt:** None; MVP prompts 00–14 are complete
 - **Last completed prompt:** 14 — MVP Hardening
-- **Known blockers:** Local MCP runtime absent; user home and Git metadata are read-only in the current coding environment
+- **Known blockers:** User home and source Git metadata are read-only in the current coding environment; intermittent initial-import writer contention remains an open operational issue
 
 The running integration foundation now discovers Claude Code, Continue,
 OpenCode, and Agy sessions from a read-only agent home, correlates sessions by
@@ -576,3 +576,32 @@ derived prose. Full messages and recorded observations are unchanged. All 158
 Rust tests/doc tests and strict Clippy pass with both startup fixes. The image
 is being rebuilt again to include this real-data context case; the existing
 state volume and cursors are preserved across recreation.
+
+### Deployed verification
+
+The image `sha256:61c9015426a4255dc670dae99b7ddd9cdcde533df4b084c65128b7bca421a904`
+was built and Compose recreated `agenttool-merger-sessionmesh-1` successfully.
+The container is healthy; `/api/v1/health` returns `ok` and the web application
+returns HTTP 200 at `http://192.168.155.225:8787/`. The state volume is retained
+across recreation; native sources remain mounted read-only. Inspect confirms
+UID/GID 1000, read-only root, 1 GiB memory/combined swap, one CPU and 128 PIDs.
+An observed import-time sample used approximately 178 MiB; this is not a
+long-running production soak result.
+
+Inspection during active import counted 19,276 retained conversation events,
+zero separate tool/code events and 194 generated handoffs. No maintenance
+`--apply`, volume deletion or native-store cleanup was performed during this
+startup verification.
+
+MCP negotiation, all five tools and workspace handoff delivery pass the final
+`scripts/check-sessionmesh-mcp` probe. Earlier probes returned
+`no handoff for current session` until initial reconciliation reached this
+workspace. Reconciliation logs also contain intermittent `database is locked`
+errors during concurrent archive import. Open operational task: investigate
+writer contention under sustained real-archive import and verify a longer soak.
+The successful final MCP probe does not erase the observed contention or prove
+multi-day resource stability.
+
+The deployed source passes all 158 Rust tests/doc tests, strict Clippy, the full
+npm check pipeline, formatting and strict MkDocs in the publication checkout.
+The feature branch is published separately from `main`; no merge is performed.

@@ -232,3 +232,15 @@ completion/task prose and next actions now use explicit UTF-8-safe excerpts of
 at most 2,048 bytes with an ellipsis. Original canonical messages, raw evidence,
 and typed observation content are unchanged and remain available through their
 provenance. The regression covers long Unicode prompts and recorded tasks.
+
+## Live deployment verification
+
+The 2026-11-20 deployment is running with the configured resource limits and
+read-only source mount. Health and the web application pass. Initial archive
+import preserves conversation events and excludes separate tool/code bodies.
+The final workspace MCP probe passes protocol negotiation, the five-tool catalog
+and handoff delivery. Early probes ran before that workspace had a handoff.
+Intermittent SQLite writer contention during concurrent initial import remains
+an open operational issue. See the implementation ledger for measured counts,
+image identity and the longer-soak task. Container health alone does not
+establish that a workspace handoff is ready.
