@@ -725,3 +725,28 @@ workspace handoff pass. The malformed native source remains blocked and is not
 reported as a successful complete archive import. A post-recreation sample used
 92.65 MiB of the 1 GiB limit; it is not a long-running memory-soak result.
 Changes are published on `feat/grok-build-import`; main is not modified.
+
+## Persistent agent navigation — 2026-11-20
+
+The user reported OpenCode disappearing and explicitly requested all agent tools
+in the left navigation without switching pages. Production API verification
+found all 40 OpenCode sessions intact. The first 200-session page contained
+Codex/Agy/Claude/Continue and 21 Grok sessions; the UI incorrectly derived the
+agent tree from that page. Archive paging fixed reachability but did not satisfy
+persistent tool visibility.
+
+A focused API regression failed before the new inventory route existed, and a
+GUI regression failed because later tools were absent. The storage layer now
+aggregates family/session counts without loading events or enumerating complete
+session summaries. The authenticated inventory keeps all agent headings visible
+in a compact selector above the independently scrolling session list. Selecting
+an agent resets session cursors
+and loads that family's sessions through the existing server filter. Paging
+controls live within the active branch; cross-tool search also updates scope.
+Visible correlation cards retrieve individual metadata summaries for peers
+outside the chosen agent, keeping paired context available without loading
+other full session pages.
+The inventory refreshes every 30 seconds. Payload paging and four-request detail
+limits remain in effect. No session data is removed or re-imported for this fix.
+The exposed MCP transport was closed at the session-start handoff attempt;
+confirmed state and changes are recorded here.

@@ -5,6 +5,14 @@ changes to SessionMesh are recorded here.
 
 ## Unreleased
 
+### Agent navigation
+
+- Keep every imported agent in the left navigation using an authenticated,
+  payload-free inventory with total session counts. Clicking an agent loads its
+  own bounded session page directly; sessions from later agents no longer appear
+  to disappear behind the first 200 records. Pagination stays within the chosen
+  agent, and cross-tool search selection updates its navigation scope.
+
 ### Grok Build
 
 - Added read-only, bounded incremental import of authoritative Grok ACP update

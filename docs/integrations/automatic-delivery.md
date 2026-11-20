@@ -82,9 +82,10 @@ target, allowing one larger record intact. Persisted cursors support restart;
 truncation/first-line replacement uses the existing idempotent replay path.
 
 Grok sessions participate in workspace correlation, search, handoffs and the
-Web UI under tool family `grok`. Use **Next sessions** / **Previous sessions**
-to reach archive pages beyond the first 200 records; filters apply to the
-current page. Import does not run Grok, invoke models, alter client settings or
+Web UI under tool family `grok`. Every imported tool stays visible in the left
+navigation. Click its heading to load its sessions directly; **Next sessions** /
+**Previous sessions** page through that tool’s archive, and text filters apply
+to the current session page. Import does not run Grok, invoke models, alter client settings or
 write native stores. Existing MCP registration continues to provide outbound
 context delivery.
 

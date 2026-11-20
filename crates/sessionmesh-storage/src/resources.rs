@@ -372,6 +372,23 @@ impl Storage {
         }))
     }
 
+    /// Counts imported sessions by tool without reading transcript payloads or session pages.
+    ///
+    /// # Errors
+    /// Returns a database or numeric-range error.
+    pub async fn native_session_tool_counts(&self) -> Result<Vec<(String, u64)>, StorageError> {
+        let rows = sqlx::query("SELECT tool_family, COUNT(*) AS session_count FROM native_sessions GROUP BY tool_family ORDER BY tool_family")
+            .fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.get("tool_family"),
+                    to_u64(row.get("session_count"), "session_count")?,
+                ))
+            })
+            .collect()
+    }
+
     /// Reads a bounded identity-ordered native-session page before projecting statistics.
     ///
     /// # Errors

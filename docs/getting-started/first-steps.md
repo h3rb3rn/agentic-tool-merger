@@ -298,8 +298,10 @@ transcript.
 MCP delivery and transcript import are separate capabilities. OpenCode sessions,
 Agy prompt history and Grok Build conversation updates can be imported. Grok
 prompts, replies and reasoning appear under `grok`; its sessions also contribute
-to shared handoffs. Use **Next sessions** and **Previous sessions** to browse
-beyond the first 200 records. Complete Agy assistant trajectories remain outside
+to shared handoffs. Every imported agent remains visible in the selector above the left session
+list. Click an agent
+to load its sessions directly. **Next sessions** and **Previous sessions** browse
+additional sessions inside that agent. Complete Agy assistant trajectories remain outside
 the current import coverage. See the
 [Grok Build import contract](../integrations/automatic-delivery.md#grok-build-import).
 

@@ -3,6 +3,11 @@ export interface Page<T> {
   next_cursor: string | null;
 }
 
+export interface NativeSessionTool {
+  tool_family: string;
+  session_count: number;
+}
+
 export interface NativeSession {
   id: string;
   tool_family: string;
@@ -76,7 +81,12 @@ export interface GlobalSessionDetail {
 }
 
 export interface SessionMeshClient {
-  listSessions(cursor?: string): Promise<Page<NativeSession>>;
+  listSessionTools(): Promise<NativeSessionTool[]>;
+  getSession(id: string): Promise<NativeSession>;
+  listSessions(
+    cursor?: string,
+    toolFamily?: string,
+  ): Promise<Page<NativeSession>>;
   listEvents(
     sessionId: string,
     kind?: string,
@@ -175,9 +185,13 @@ export function createApiClient(
     });
 
   return {
-    listSessions: (cursor) => {
+    listSessionTools: () => request("/api/v1/native-session-tools"),
+    getSession: (id) =>
+      request(`/api/v1/native-sessions/${encodeURIComponent(id)}`),
+    listSessions: (cursor, toolFamily) => {
       const query = new URLSearchParams({ limit: "200" });
       if (cursor) query.set("cursor", cursor);
+      if (toolFamily) query.set("tool_family", toolFamily);
       return request(`/api/v1/native-sessions?${query.toString()}`);
     },
     listEvents: (sessionId, kind, cursor) => {
