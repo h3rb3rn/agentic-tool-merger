@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "global_session_id": "gs_019example",
   "objective": "Build the Codex ingestion vertical slice",
   "status": {
@@ -28,6 +28,16 @@
     {
       "event_id": "sha256:a153271f13e4b47901af4cc07ae71d81e28da6c2fe17200a2fe4411da807d533",
       "field": "open_tasks[0]"
+    },
+    {
+      "event_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "field": "latest_user_request"
+    },
+    {
+      "event_id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "field": "latest_assistant_reply"
     }
-  ]
+  ],
+  "latest_user_request": "Please fix the partial JSONL handling",
+  "latest_assistant_reply": "I will start with the cursor logic."
 }

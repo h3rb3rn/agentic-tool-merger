@@ -1,0 +1,7 @@
+{
+  "name": "sessionmesh",
+  "version": "0.1.0",
+  "description": "Continue work from sessions of other coding agents (Codex, OpenCode, Agy, Grok Build, Continue, Claude Code) inside a new Claude Code session, using SessionMesh's local, read-only, provenance-backed context.",
+  "license": "Apache-2.0",
+  "keywords": ["sessionmesh", "handoff", "mcp", "session", "continuation"]
+}

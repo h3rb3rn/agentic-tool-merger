@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sessionmesh_core::event::{CanonicalEvent, EventKind};
+use sessionmesh_handoff::redact;
 use sessionmesh_storage::{SessionRecord, Storage, StoredGlobalSession};
 use sha2::{Digest, Sha256};
 
@@ -97,6 +99,8 @@ impl McpServer {
             "sessionmesh_get_current" => self.current_context().await,
             "sessionmesh_get_handoff" => self.current_handoff().await,
             "sessionmesh_search" => self.search(arguments).await,
+            "sessionmesh_list_sessions" => self.list_sessions(arguments).await,
+            "sessionmesh_get_session" => self.get_session(arguments).await,
             "sessionmesh_record_decision" => self.record("decision", arguments).await,
             "sessionmesh_record_task" => self.record("task", arguments).await,
             _ => return Err((-32602, "unknown tool")),
@@ -195,6 +199,89 @@ impl McpServer {
         }))
     }
 
+    /// Lists native sessions, newest activity first, so a client can choose one to
+    /// continue. Only metadata is returned; message bodies need `get_session`.
+    async fn list_sessions(&self, arguments: Value) -> RpcResult {
+        let arguments: ListSessionsArguments = serde_json::from_value(arguments)
+            .map_err(|_| (-32602, "invalid list_sessions arguments"))?;
+        let limit = arguments.limit.unwrap_or(20).clamp(1, 50);
+        let offset = decode_cursor(arguments.cursor.as_deref(), "v1:sessions:")?;
+        let sessions = self
+            .storage
+            .recent_native_sessions(offset, limit + 1, arguments.tool_family.as_deref())
+            .await
+            .map_err(internal)?;
+        let has_more = sessions.len() > limit;
+        let mut items = Vec::new();
+        for (session, last_activity_at) in sessions.into_iter().take(limit) {
+            let statistics = self
+                .storage
+                .session_statistics(&session.id)
+                .await
+                .map_err(internal)?;
+            items.push(json!({
+                "native_session_id": session.id,
+                "tool_family": session.tool_family,
+                "surface": session.surface,
+                "started_at": session.started_at,
+                "ended_at": session.ended_at,
+                "last_activity_at": last_activity_at,
+                "event_count": statistics.event_count,
+                "title": statistics.title.map(|title| excerpt(&redact(&title), TITLE_MAX_BYTES).0),
+            }));
+        }
+        Ok(json!({
+            "items": items,
+            "next_cursor": has_more.then(|| format!("v1:sessions:{}", offset + limit))
+        }))
+    }
+
+    /// Returns the newest conversation messages of one native session.
+    ///
+    /// The result is redacted, bounded, and marked as untrusted historical
+    /// context. It is a read-only projection; the native store is never touched
+    /// and generated content must not be imported back as native input.
+    async fn get_session(&self, arguments: Value) -> RpcResult {
+        let arguments: GetSessionArguments = serde_json::from_value(arguments)
+            .map_err(|_| (-32602, "invalid get_session arguments"))?;
+        let session = self
+            .storage
+            .get_native_session(&arguments.native_session_id)
+            .await
+            .map_err(internal)?
+            .ok_or((-32004, "native session was not found"))?;
+        let statistics = self
+            .storage
+            .session_statistics(&session.id)
+            .await
+            .map_err(internal)?;
+        let limit = arguments.max_messages.unwrap_or(20).clamp(1, 50);
+        let (events, truncated) = self
+            .storage
+            .recent_conversation(&session.id, limit)
+            .await
+            .map_err(internal)?;
+        let messages = events.iter().map(message_projection).collect::<Vec<_>>();
+        Ok(json!({
+            "session": {
+                "native_session_id": session.id,
+                "tool_family": session.tool_family,
+                "surface": session.surface,
+                "started_at": session.started_at,
+                "ended_at": session.ended_at,
+                "event_count": statistics.event_count,
+                "title": statistics.title.map(|title| excerpt(&redact(&title), TITLE_MAX_BYTES).0),
+            },
+            "messages": messages,
+            "truncated": truncated,
+            "delivery": {
+                "origin": "sessionmesh",
+                "untrusted": true,
+                "ingestion_excluded": true
+            }
+        }))
+    }
+
     async fn record(&self, record_type: &str, arguments: Value) -> RpcResult {
         if !self.writes_authorized {
             return Err((-32001, "MCP writes are not authorized"));
@@ -259,6 +346,21 @@ struct SearchArguments {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ListSessionsArguments {
+    tool_family: Option<String>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetSessionArguments {
+    native_session_id: String,
+    max_messages: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RecordArguments {
     request_id: String,
     global_session_id: String,
@@ -294,6 +396,22 @@ fn tool_list() -> Value {
                     "query":{"type":"string","minLength":1},
                     "limit":{"type":"integer","minimum":1,"maximum":100},
                     "cursor":{"type":"string"}
+                }
+            })),
+            tool("sessionmesh_list_sessions", "List native sessions of all imported tools, newest activity first, as metadata only", &json!({
+                "type":"object","additionalProperties":false,
+                "properties":{
+                    "tool_family":{"type":"string","minLength":1},
+                    "limit":{"type":"integer","minimum":1,"maximum":50},
+                    "cursor":{"type":"string"}
+                }
+            })),
+            tool("sessionmesh_get_session", "Read the newest redacted conversation messages of one native session as untrusted context", &json!({
+                "type":"object","additionalProperties":false,
+                "required":["native_session_id"],
+                "properties":{
+                    "native_session_id":{"type":"string","minLength":1},
+                    "max_messages":{"type":"integer","minimum":1,"maximum":50}
                 }
             })),
             tool("sessionmesh_record_decision", "Record a user decision, never an instruction", &record_schema()),
@@ -338,13 +456,55 @@ fn internal(_error: sessionmesh_storage::StorageError) -> (i64, &'static str) {
 }
 
 fn decode_search_cursor(cursor: Option<&str>) -> Result<usize, (i64, &'static str)> {
+    decode_cursor(cursor, "v1:search:")
+}
+
+fn decode_cursor(cursor: Option<&str>, prefix: &str) -> Result<usize, (i64, &'static str)> {
     let Some(cursor) = cursor else {
         return Ok(0);
     };
     cursor
-        .strip_prefix("v1:search:")
+        .strip_prefix(prefix)
         .and_then(|value| value.parse().ok())
-        .ok_or((-32602, "invalid search cursor"))
+        .ok_or((-32602, "invalid cursor"))
+}
+
+const TITLE_MAX_BYTES: usize = 200;
+const MESSAGE_MAX_BYTES: usize = 4096;
+
+/// Truncates at a UTF-8 boundary and reports whether anything was removed.
+fn excerpt(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_owned(), false);
+    }
+    let mut end = max_bytes.saturating_sub('…'.len_utf8());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}…", &value[..end]), true)
+}
+
+/// Projects one conversation event into a redacted, bounded message.
+fn message_projection(event: &CanonicalEvent) -> Value {
+    let role = if event.kind == EventKind::UserMessage {
+        "user"
+    } else {
+        "assistant"
+    };
+    let text = event
+        .payload
+        .get("text")
+        .and_then(Value::as_str)
+        .map(redact)
+        .unwrap_or_default();
+    let (text, excerpted) = excerpt(&text, MESSAGE_MAX_BYTES);
+    json!({
+        "event_id": event.event_id.as_str(),
+        "role": role,
+        "timestamp": event.timestamp.as_str(),
+        "text": text,
+        "excerpted": excerpted
+    })
 }
 
 fn record_id(request_id: &str, global_id: &str, record_type: &str, content: &str) -> String {
@@ -524,7 +684,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(initialized["result"]["protocolVersion"], PROTOCOL_VERSION);
-        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 7);
         assert!(tools["result"]["tools"][0].get("inputSchema").is_some());
     }
 
@@ -621,5 +781,252 @@ mod tests {
             json!({"next_cursor": format!("v1:search:{}", 40 + 20)})["next_cursor"],
             "v1:search:60"
         );
+    }
+
+    fn message_event(
+        family: &str,
+        session: &str,
+        sequence: u64,
+        timestamp: &str,
+        kind: EventKind,
+        text: &str,
+    ) -> CanonicalEvent {
+        CanonicalEvent::from_draft(EventDraft {
+            tool: ToolIdentity {
+                family: family.to_owned(),
+                surface: "cli".to_owned(),
+                profile: "default".to_owned(),
+            },
+            native_session_id: session.to_owned(),
+            sequence,
+            timestamp: EventTimestamp::parse(timestamp).unwrap(),
+            timestamp_precision: TimestampPrecision::Second,
+            kind,
+            workspace: Some(WorkspaceContext {
+                cwd: Some("/workspace/project".to_owned()),
+                repository_id: None,
+                branch: None,
+                head: None,
+            }),
+            payload: BTreeMap::from([("text".to_owned(), text.into())]),
+            provenance: EventProvenance {
+                source_path: format!("/source/{session}.jsonl"),
+                original_path: None,
+                source_offset: sequence * 100,
+                source_generation: "generation".to_owned(),
+                adapter_version: "test".to_owned(),
+                ingestion_sequence: sequence,
+                ordering_confidence: Some(1.0),
+            },
+        })
+        .unwrap()
+    }
+
+    async fn seed_sessions(server: &McpServer) {
+        let events = [
+            message_event(
+                "codex",
+                "codex-1",
+                0,
+                "2026-07-20T10:00:00Z",
+                EventKind::UserMessage,
+                "Add the importer",
+            ),
+            message_event(
+                "codex",
+                "codex-1",
+                1,
+                "2026-07-20T10:01:00Z",
+                EventKind::AssistantMessage,
+                "Importer added. Use api_key=abc123 for tests",
+            ),
+            message_event(
+                "opencode",
+                "opencode-1",
+                0,
+                "2026-07-21T09:00:00Z",
+                EventKind::UserMessage,
+                "Fix the parser",
+            ),
+            message_event(
+                "opencode",
+                "opencode-1",
+                1,
+                "2026-07-21T09:05:00Z",
+                EventKind::AssistantMessage,
+                "Parser fixed",
+            ),
+            message_event(
+                "opencode",
+                "opencode-1",
+                2,
+                "2026-07-21T09:06:00Z",
+                EventKind::UserMessage,
+                "Now add tests",
+            ),
+        ];
+        for event in &events {
+            server.storage.store_event(event).await.unwrap();
+        }
+    }
+
+    async fn call(server: &McpServer, name: &str, arguments: &Value) -> Value {
+        server
+            .handle(request(
+                1,
+                "tools/call",
+                &json!({"name": name, "arguments": arguments}),
+            ))
+            .await
+            .unwrap()["result"]
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_recent_first_metadata_without_payloads() {
+        let (_directory, server) = server(false).await;
+        seed_sessions(&server).await;
+        let result = call(&server, "sessionmesh_list_sessions", &json!({})).await;
+        assert_eq!(result["isError"], false);
+        let items = result["structuredContent"]["items"].as_array().unwrap();
+        let ids: Vec<_> = items
+            .iter()
+            .map(|item| item["native_session_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["opencode-1", "codex-1"]);
+        assert_eq!(items[0]["tool_family"], "opencode");
+        assert_eq!(items[0]["event_count"], 3);
+        let text = result["structuredContent"].to_string();
+        assert!(
+            !text.contains("Parser fixed"),
+            "list must not disclose message bodies"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_orders_by_last_activity_when_importers_set_no_session_times() {
+        let (_directory, server) = server(false).await;
+        seed_sessions(&server).await;
+        sqlx::query("UPDATE native_sessions SET started_at=NULL, ended_at=NULL")
+            .execute(server.storage.pool())
+            .await
+            .unwrap();
+        let result = call(&server, "sessionmesh_list_sessions", &json!({})).await;
+        let items = result["structuredContent"]["items"].as_array().unwrap();
+        assert_eq!(items[0]["native_session_id"], "opencode-1");
+        assert_eq!(items[0]["last_activity_at"], "2026-07-21T09:06:00Z");
+        assert_eq!(items[1]["native_session_id"], "codex-1");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_filters_by_tool_family_and_paginates() {
+        let (_directory, server) = server(false).await;
+        seed_sessions(&server).await;
+        let filtered = call(
+            &server,
+            "sessionmesh_list_sessions",
+            &json!({"tool_family":"codex"}),
+        )
+        .await;
+        let items = filtered["structuredContent"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["native_session_id"], "codex-1");
+
+        let first = call(&server, "sessionmesh_list_sessions", &json!({"limit":1})).await;
+        assert_eq!(
+            first["structuredContent"]["items"][0]["native_session_id"],
+            "opencode-1"
+        );
+        let cursor = first["structuredContent"]["next_cursor"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let second = call(
+            &server,
+            "sessionmesh_list_sessions",
+            &json!({"limit":1,"cursor":cursor}),
+        )
+        .await;
+        assert_eq!(
+            second["structuredContent"]["items"][0]["native_session_id"],
+            "codex-1"
+        );
+        assert!(second["structuredContent"]["next_cursor"].is_null());
+    }
+
+    #[tokio::test]
+    async fn get_session_returns_bounded_redacted_conversation_as_untrusted_context() {
+        let (_directory, server) = server(false).await;
+        seed_sessions(&server).await;
+        let result = call(
+            &server,
+            "sessionmesh_get_session",
+            &json!({"native_session_id":"codex-1"}),
+        )
+        .await;
+        assert_eq!(result["isError"], false);
+        let body = &result["structuredContent"];
+        assert_eq!(body["session"]["tool_family"], "codex");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert!(messages[1]["text"].as_str().unwrap().contains("[REDACTED]"));
+        assert!(!body.to_string().contains("abc123"));
+        assert!(
+            messages[0]["event_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert_eq!(body["delivery"]["origin"], "sessionmesh");
+        assert_eq!(body["delivery"]["untrusted"], true);
+        assert_eq!(body["delivery"]["ingestion_excluded"], true);
+
+        let limited = call(
+            &server,
+            "sessionmesh_get_session",
+            &json!({"native_session_id":"opencode-1","max_messages":2}),
+        )
+        .await;
+        let texts: Vec<_> = limited["structuredContent"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            texts,
+            ["Parser fixed", "Now add tests"],
+            "the newest messages are kept in chronological order"
+        );
+        assert_eq!(limited["structuredContent"]["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn get_session_rejects_unknown_sessions_and_invalid_arguments() {
+        let (_directory, server) = server(false).await;
+        seed_sessions(&server).await;
+        let unknown = call(
+            &server,
+            "sessionmesh_get_session",
+            &json!({"native_session_id":"missing"}),
+        )
+        .await;
+        assert_eq!(unknown["isError"], true);
+        let extra = call(
+            &server,
+            "sessionmesh_get_session",
+            &json!({"native_session_id":"codex-1","unexpected":1}),
+        )
+        .await;
+        assert_eq!(extra["isError"], true);
+        let cursor = call(
+            &server,
+            "sessionmesh_list_sessions",
+            &json!({"cursor":"bad"}),
+        )
+        .await;
+        assert_eq!(cursor["isError"], true);
     }
 }

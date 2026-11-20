@@ -10,7 +10,10 @@ use sessionmesh_core::event::{CanonicalEvent, EventKind};
 use sha2::{Digest, Sha256};
 
 /// Current version of the published handoff contract.
-pub const HANDOFF_SCHEMA_VERSION: &str = "1.0";
+///
+/// Version 1.1 adds the optional `latest_user_request` and
+/// `latest_assistant_reply` observations. Version 1.0 documents stay readable.
+pub const HANDOFF_SCHEMA_VERSION: &str = "1.1";
 
 /// Compact agent handoff matching the published JSON Schema.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -37,6 +40,18 @@ pub struct Handoff {
     pub relevant_files: Vec<String>,
     /// Recommended next action.
     pub next_action: String,
+    /// Latest user message, kept as an unclassified observation.
+    ///
+    /// It is deliberately separate from `open_tasks`: a question or remark is
+    /// not a task until an explicit task event or recorded task says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_user_request: Option<String>,
+    /// Latest assistant message, kept as an unverified observation.
+    ///
+    /// It is deliberately separate from `completed`: assistant prose is a
+    /// claim, not verified completed work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_assistant_reply: Option<String>,
     /// Field-level source references.
     pub provenance: Vec<FieldProvenance>,
 }
@@ -262,17 +277,20 @@ pub async fn generate(
         bound_excerpt(value);
     }
     bound_excerpt(&mut facts.next_action);
+    for value in facts
+        .latest_user_request
+        .iter_mut()
+        .chain(facts.latest_assistant_reply.iter_mut())
+    {
+        bound_excerpt(value);
+    }
     let completion = completion(&facts);
     let mut handoff = Handoff {
         schema_version: HANDOFF_SCHEMA_VERSION.to_owned(),
         global_session_id: input.global_session_id.to_owned(),
         objective: input.objective.trim().to_owned(),
         status: HandoffStatus {
-            phase: if facts.open_tasks.is_empty() {
-                "verification".to_owned()
-            } else {
-                "implementation".to_owned()
-            },
+            phase: phase(&facts).to_owned(),
             completion,
         },
         decisions: facts.decisions,
@@ -282,6 +300,8 @@ pub async fn generate(
         tests: facts.tests,
         relevant_files: facts.relevant_files,
         next_action: facts.next_action,
+        latest_user_request: facts.latest_user_request,
+        latest_assistant_reply: facts.latest_assistant_reply,
         provenance: facts.provenance,
     };
     enforce_budget(&mut handoff, input.token_budget)?;
@@ -312,7 +332,23 @@ struct ExtractedFacts {
     relevant_files: Vec<String>,
     tests: TestState,
     next_action: String,
+    latest_user_request: Option<String>,
+    latest_assistant_reply: Option<String>,
     provenance: Vec<FieldProvenance>,
+}
+
+/// Names the phase only from explicit facts.
+///
+/// Without explicit tasks or completed work the phase is `unknown`; conversation
+/// messages alone never imply that work is in progress or being verified.
+fn phase(facts: &ExtractedFacts) -> &'static str {
+    if !facts.open_tasks.is_empty() {
+        "implementation"
+    } else if !facts.completed.is_empty() {
+        "verification"
+    } else {
+        "unknown"
+    }
 }
 
 fn extract_facts(events: &[CanonicalEvent]) -> ExtractedFacts {
@@ -382,32 +418,39 @@ fn extract_facts(events: &[CanonicalEvent]) -> ExtractedFacts {
             _ => {}
         }
     }
-    if tasks.is_empty()
-        && let Some((text, event)) = latest_user
-    {
-        push_fact(&mut facts.provenance, &mut tasks, text, event, "open_tasks");
+    // Messages are observations. They are reported beside, never as, tasks or
+    // completed work, and keep provenance so a handoff always has a source.
+    if let Some((text, event)) = latest_user {
+        facts.latest_user_request = text;
+        push_observation_provenance(&mut facts.provenance, event, "latest_user_request");
     }
-    if completed.is_empty()
-        && let Some((text, event)) = latest_assistant
-    {
-        push_fact(
-            &mut facts.provenance,
-            &mut completed,
-            text,
-            event,
-            "completed",
-        );
+    if let Some((text, event)) = latest_assistant {
+        facts.latest_assistant_reply = text;
+        push_observation_provenance(&mut facts.provenance, event, "latest_assistant_reply");
     }
     facts.decisions = decisions.into_iter().collect();
     facts.completed = completed.into_iter().collect();
     facts.open_tasks = tasks.into_iter().collect();
     facts.relevant_files = files.into_iter().collect();
-    facts.next_action = facts
-        .open_tasks
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "Review the latest verified state".to_owned());
+    facts.next_action = facts.open_tasks.first().cloned().unwrap_or_else(|| {
+        if facts.latest_user_request.is_some() {
+            "Review the latest user request".to_owned()
+        } else {
+            "Review the latest verified state".to_owned()
+        }
+    });
     facts
+}
+
+fn push_observation_provenance(
+    provenance: &mut Vec<FieldProvenance>,
+    event: &CanonicalEvent,
+    field: &str,
+) {
+    provenance.push(FieldProvenance {
+        event_id: event.event_id.as_str().to_owned(),
+        field: field.to_owned(),
+    });
 }
 
 fn apply_recorded_facts(facts: &mut ExtractedFacts, records: &[RecordedFact]) {
@@ -538,6 +581,10 @@ fn enforce_budget(handoff: &mut Handoff, token_budget: usize) -> Result<(), Hand
             Some("decisions")
         } else if handoff.open_tasks.len() > 1 && handoff.open_tasks.pop().is_some() {
             Some("open_tasks")
+        } else if handoff.provenance.len() > 1 && handoff.latest_assistant_reply.take().is_some() {
+            Some("latest_assistant_reply")
+        } else if handoff.provenance.len() > 1 && handoff.latest_user_request.take().is_some() {
+            Some("latest_user_request")
         } else {
             None
         };
@@ -569,7 +616,13 @@ fn redacted_model_input(objective: &str, events: &[CanonicalEvent]) -> String {
     .to_string()
 }
 
-fn redact(value: &str) -> String {
+/// Replaces words that look like credentials with `[REDACTED]`.
+///
+/// This is the single redaction boundary for derived context. Every surface that
+/// delivers transcript text to an agent must use it, so secrets never leave the
+/// local store through a handoff, a model request, or an MCP tool.
+#[must_use]
+pub fn redact(value: &str) -> String {
     value
         .split_whitespace()
         .map(|word| {
@@ -749,13 +802,19 @@ mod tests {
         )];
         let handoff = generate(input(&events, 4000), None).await.unwrap();
         assert!(approximate_tokens(&handoff) <= 4000);
-        assert!(handoff.next_action.ends_with('…'));
-        assert!(handoff.open_tasks[0].ends_with('…'));
+        assert!(handoff.open_tasks.is_empty());
+        assert!(
+            handoff
+                .latest_user_request
+                .as_deref()
+                .is_some_and(|text| text.ends_with('…'))
+        );
         assert!(
             handoff
                 .provenance
                 .iter()
-                .any(|source| source.event_id == events[0].event_id.as_str())
+                .any(|source| source.event_id == events[0].event_id.as_str()
+                    && source.field == "latest_user_request")
         );
         assert_eq!(events[0].payload["text"], original);
         let records = vec![RecordedFact {
@@ -767,6 +826,8 @@ mod tests {
         with_records.records = &records;
         let handoff = generate(with_records, None).await.unwrap();
         assert!(approximate_tokens(&handoff) <= 4000);
+        assert!(handoff.open_tasks[0].ends_with('…'));
+        assert!(handoff.next_action.ends_with('…'));
         assert_eq!(records[0].content, original);
     }
 
@@ -785,5 +846,121 @@ mod tests {
         let handoff = generate(input(&events, 180), None).await.unwrap();
         assert!(handoff.relevant_files.len() < events.len());
         assert_eq!(events, original);
+    }
+
+    fn text(value: &str) -> BTreeMap<String, serde_json::Value> {
+        BTreeMap::from([("text".to_owned(), value.into())])
+    }
+
+    #[tokio::test]
+    async fn conversation_messages_are_never_classified_as_tasks_or_completed_work() {
+        let events = vec![
+            event(0, EventKind::UserMessage, text("Is the service connected?")),
+            event(1, EventKind::AssistantMessage, text("Yes, partly.")),
+        ];
+        let handoff = generate(input(&events, 2_000), None).await.unwrap();
+        assert!(handoff.open_tasks.is_empty());
+        assert!(handoff.completed.is_empty());
+        assert_eq!(
+            handoff.latest_user_request.as_deref(),
+            Some("Is the service connected?")
+        );
+        assert_eq!(
+            handoff.latest_assistant_reply.as_deref(),
+            Some("Yes, partly.")
+        );
+        assert_eq!(handoff.status.completion, 0);
+        assert_eq!(handoff.status.phase, "unknown");
+        assert_eq!(handoff.next_action, "Review the latest user request");
+        for (index, field) in [(0, "latest_user_request"), (1, "latest_assistant_reply")] {
+            assert!(handoff.provenance.iter().any(|source| {
+                source.field == field && source.event_id == events[index].event_id.as_str()
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn latest_messages_are_observations_beside_explicit_tasks() {
+        let events = vec![
+            event(0, EventKind::Task, text("Implement MCP")),
+            event(1, EventKind::UserMessage, text("First question")),
+            event(2, EventKind::UserMessage, text("Second question")),
+            event(3, EventKind::AssistantMessage, text("Second answer")),
+        ];
+        let handoff = generate(input(&events, 2_000), None).await.unwrap();
+        assert_eq!(handoff.open_tasks, ["Implement MCP"]);
+        assert!(handoff.completed.is_empty());
+        assert_eq!(
+            handoff.latest_user_request.as_deref(),
+            Some("Second question")
+        );
+        assert_eq!(
+            handoff.latest_assistant_reply.as_deref(),
+            Some("Second answer")
+        );
+        assert_eq!(handoff.next_action, "Implement MCP");
+        assert_eq!(handoff.status.phase, "implementation");
+    }
+
+    #[tokio::test]
+    async fn latest_messages_are_redacted() {
+        let events = vec![event(
+            0,
+            EventKind::UserMessage,
+            text("Use api_key=synthetic-secret"),
+        )];
+        let handoff = generate(input(&events, 2_000), None).await.unwrap();
+        assert_eq!(
+            handoff.latest_user_request.as_deref(),
+            Some("Use [REDACTED]")
+        );
+    }
+
+    #[tokio::test]
+    async fn explicitly_completed_tasks_still_populate_completed_work() {
+        let events = vec![event(
+            0,
+            EventKind::Task,
+            BTreeMap::from([
+                ("text".to_owned(), "Parser".into()),
+                ("status".to_owned(), "completed".into()),
+            ]),
+        )];
+        let handoff = generate(input(&events, 2_000), None).await.unwrap();
+        assert_eq!(handoff.completed, ["Parser"]);
+        assert_eq!(handoff.status.phase, "verification");
+        assert_eq!(handoff.status.completion, 100);
+    }
+
+    #[test]
+    fn version_1_0_handoffs_remain_readable_and_unchanged() {
+        let legacy = r#"{"schema_version":"1.0","global_session_id":"gs_old","objective":"Old","status":{"phase":"implementation","completion":50},"decisions":[],"completed":["a"],"open_tasks":["b"],"repository":{"branch":null,"head":null,"dirty":false},"tests":{"passed":0,"failed":0,"failing":[]},"relevant_files":[],"next_action":"b","provenance":[]}"#;
+        let handoff: Handoff = serde_json::from_str(legacy).unwrap();
+        assert_eq!(handoff.latest_user_request, None);
+        assert_eq!(serde_json::to_string(&handoff).unwrap(), legacy);
+    }
+
+    #[tokio::test]
+    async fn budget_pressure_drops_observations_before_failing() {
+        let long = "word ".repeat(300);
+        let mut events = (0..3)
+            .map(|index| {
+                event(
+                    index,
+                    EventKind::FileRead,
+                    BTreeMap::from([("path".to_owned(), format!("src/f{index}.rs").into())]),
+                )
+            })
+            .collect::<Vec<_>>();
+        events.push(event(3, EventKind::UserMessage, text("Short request")));
+        events.push(event(4, EventKind::AssistantMessage, text(&long)));
+        let handoff = generate(input(&events, 200), None).await.unwrap();
+        assert!(approximate_tokens(&handoff) <= 200);
+        assert!(handoff.latest_assistant_reply.is_none());
+        assert_eq!(
+            handoff.latest_user_request.as_deref(),
+            Some("Short request")
+        );
+        assert!(!handoff.provenance.is_empty());
     }
 }

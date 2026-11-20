@@ -41,6 +41,7 @@ nav:
   - Home: index.md
   - Getting Started:
       - First Steps: getting-started/first-steps.md
+      - Session Handoff FAQ: getting-started/session-handoffs.md
   - Architecture:
       - Complete Project Plan: architecture/project-plan.md
       - Canonical Events: architecture/canonical-events.md
@@ -62,6 +63,7 @@ nav:
           - ADR-009 Event Chronology: adr/009-chronology-uses-multiple-ordering-signals.md
           - ADR-010 Incremental Derived State: adr/010-derived-state-is-maintained-incrementally.md
           - ADR-011 Retention and Resources: adr/011-conversation-retention-and-bounded-resources.md
+          - ADR-012 Handoff Observations: adr/012-handoff-separates-observations-from-tasks.md
   - Operations:
       - Resource Management: operations/resource-management.md
   - Development:
@@ -84,6 +86,7 @@ nav:
       - Network Ingestion: api/ingest.md
   - Integrations:
       - Automatic delivery: integrations/automatic-delivery.md
+      - Claude Code plugin: integrations/claude-code-plugin.md
   - User Interface:
       - Session Timeline: ui/session-timeline.md
   - Implementation:

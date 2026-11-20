@@ -5,6 +5,62 @@ changes to SessionMesh are recorded here.
 
 ## Unreleased
 
+### Claude Code plugin
+
+- Added the `sessionmesh` Claude Code plugin (`plugins/sessionmesh`, marketplace
+  manifest in `.claude-plugin/`) with `/sessionmesh:sessions` and
+  `/sessionmesh:continue` to continue a session created by Codex, OpenCode, Agy,
+  Grok Build, Continue, or another Claude Code session. It bundles the MCP bridge
+  and uses read-only tools only.
+- Added the read-only MCP tools `sessionmesh_list_sessions` (metadata, newest
+  activity first, `tool_family` filter, cursor paging) and
+  `sessionmesh_get_session` (newest redacted, bounded messages of one native
+  session, marked untrusted and ingestion-excluded). The MCP tool count is now
+  seven, so `scripts/check-sessionmesh-mcp` requires a service image that
+  includes them.
+- Exported `sessionmesh_handoff::redact` as the shared redaction boundary.
+
+### Handoff correctness
+
+- Fixed handoffs presenting conversation as work: the latest user message was
+  delivered as an open task and next action, and the latest assistant message as
+  completed work, producing false phase and completion values. `open_tasks` and
+  `completed` now contain only explicit task/plan events and MCP-recorded facts.
+- Handoff schema **1.1** adds optional `latest_user_request` and
+  `latest_assistant_reply` observations with provenance and redaction. Phase is
+  `unknown` without explicit tasks or completed work. Schema 1.0 documents stay
+  valid and readable; existing snapshots are not rewritten and are replaced when
+  a global session is next reconciled. See ADR-012.
+
+### Web FAQ
+
+- Added a public FAQ page with verified native resume, MCP setup and cross-client
+  handoff commands for Codex, Claude Code, Agy, OpenCode, Grok Build and Continue.
+  Includes rate-limit continuation, source-ID guidance, import limitations,
+  manual handoffs and connection troubleshooting.
+- Added header/login links, direct section anchors and copy controls with manual
+  selection on HTTP origins. Returning from the FAQ preserves timeline state;
+  direct FAQ links avoid archive requests even with saved authentication.
+
+### Agent navigation
+
+- Keep every imported agent in the left navigation using an authenticated,
+  payload-free inventory with total session counts. Clicking an agent loads its
+  own bounded session page directly; sessions from later agents no longer appear
+  to disappear behind the first 200 records. Pagination stays within the chosen
+  agent, and cross-tool search selection updates its navigation scope.
+
+### Grok Build
+
+- Added read-only, bounded incremental import of authoritative Grok ACP update
+  logs in the daemon and network collector. Prompts, assistant responses and
+  reasoning retain native session/workspace identity, timestamps and exact
+  provenance; tool dumps and duplicate chat snapshots are excluded.
+- Grok conversations now participate in correlation, search and shared handoffs.
+  Added previous/next session pages so the GUI can reach archives beyond its
+  first 200 session summaries. Plain-text envelopes render once alongside
+  expandable full canonical evidence.
+
 ### Web authentication
 
 - Recover from rejected saved API tokens with an explicit login message, cleared

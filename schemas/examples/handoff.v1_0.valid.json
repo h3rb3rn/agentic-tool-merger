@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "global_session_id": "gs_019example",
+  "objective": "Build the Codex ingestion vertical slice",
+  "status": {
+    "phase": "implementation",
+    "completion": 45
+  },
+  "decisions": [
+    "SQLite WAL is the initial database",
+    "Native session stores remain read-only"
+  ],
+  "completed": ["Rust workspace initialized"],
+  "open_tasks": ["Parse Codex tool calls"],
+  "repository": {
+    "branch": "feature/codex-adapter",
+    "head": "a218df4",
+    "dirty": true
+  },
+  "tests": {
+    "passed": 43,
+    "failed": 1,
+    "failing": ["test_partial_jsonl_line"]
+  },
+  "relevant_files": ["crates/sessionmesh-ingest/src/codex.rs"],
+  "next_action": "Fix partial JSONL handling",
+  "provenance": [
+    {
+      "event_id": "sha256:a153271f13e4b47901af4cc07ae71d81e28da6c2fe17200a2fe4411da807d533",
+      "field": "open_tasks[0]"
+    }
+  ]
+}

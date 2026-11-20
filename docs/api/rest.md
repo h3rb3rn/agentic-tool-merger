@@ -33,23 +33,24 @@ not reveal whether a resource exists.
 
 ## Milestone 1 endpoints
 
-| Method | Path                                         | Purpose                                |
-| ------ | -------------------------------------------- | -------------------------------------- |
-| GET    | `/api/v1/health`                             | Service and API version                |
-| GET    | `/api/v1/tools`                              | Safe tool discovery status             |
-| POST   | `/api/v1/tools/discover`                     | Request discovery refresh              |
-| GET    | `/api/v1/native-sessions`                    | Paginated native-session summaries     |
-| GET    | `/api/v1/native-sessions/{id}`               | One native-session summary             |
-| GET    | `/api/v1/events/search`                      | Cross-tool keyword content matches     |
-| GET    | `/api/v1/events`                             | Paginated payload-free event summaries |
-| GET    | `/api/v1/events/{id}`                        | Explicit canonical event detail reveal |
-| GET    | `/api/v1/events/stream`                      | Resumable live summaries over SSE      |
-| GET    | `/api/v1/global-sessions`                    | Global work contexts                   |
-| POST   | `/api/v1/global-sessions`                    | Create a global work context           |
-| GET    | `/api/v1/global-sessions/{id}`               | Membership and audit detail            |
-| GET    | `/api/v1/correlation-candidates`             | Explainable cross-tool candidates      |
-| POST   | `/api/v1/correlation-candidates/{id}/accept` | Accept and audit a candidate           |
-| POST   | `/api/v1/correlation-candidates/{id}/reject` | Reject and block silent relinking      |
+| Method | Path                                         | Purpose                                              |
+| ------ | -------------------------------------------- | ---------------------------------------------------- |
+| GET    | `/api/v1/health`                             | Service and API version                              |
+| GET    | `/api/v1/tools`                              | Safe tool discovery status                           |
+| POST   | `/api/v1/tools/discover`                     | Request discovery refresh                            |
+| GET    | `/api/v1/native-session-tools`               | All imported agent families and total session counts |
+| GET    | `/api/v1/native-sessions`                    | Paginated native-session summaries                   |
+| GET    | `/api/v1/native-sessions/{id}`               | One native-session summary                           |
+| GET    | `/api/v1/events/search`                      | Cross-tool keyword content matches                   |
+| GET    | `/api/v1/events`                             | Paginated payload-free event summaries               |
+| GET    | `/api/v1/events/{id}`                        | Explicit canonical event detail reveal               |
+| GET    | `/api/v1/events/stream`                      | Resumable live summaries over SSE                    |
+| GET    | `/api/v1/global-sessions`                    | Global work contexts                                 |
+| POST   | `/api/v1/global-sessions`                    | Create a global work context                         |
+| GET    | `/api/v1/global-sessions/{id}`               | Membership and audit detail                          |
+| GET    | `/api/v1/correlation-candidates`             | Explainable cross-tool candidates                    |
+| POST   | `/api/v1/correlation-candidates/{id}/accept` | Accept and audit a candidate                         |
+| POST   | `/api/v1/correlation-candidates/{id}/reject` | Reject and block silent relinking                    |
 
 Membership link/unlink endpoints and correlation accept/reject operations are
 authenticated writes. They store native-session references only, and every
@@ -65,6 +66,13 @@ silent relink until explicitly reversed.
 
 List endpoints accept `limit` from 1 to 200 and an opaque `v1` cursor. Invalid,
 unknown, or wrong-scope cursors return `400 invalid_cursor`.
+
+The authenticated `/api/v1/native-session-tools` endpoint returns every imported
+agent family and its `session_count`, sorted by family. It uses one aggregate
+metadata query and is independent of native-session cursors and page limits.
+It returns no transcript payloads or session titles. The GUI uses this inventory
+to keep every agent visible in the left navigation while fetching bounded
+session pages for the selected family.
 
 Native-session filters:
 

@@ -688,3 +688,140 @@ pre {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Keep the complete agent selector above independently scrolling session rows. */
+aside .agent-tools {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-height: none;
+  overflow: visible;
+}
+
+.agent-tool {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.65rem;
+  text-align: left;
+}
+
+.agent-tool[aria-pressed="true"] {
+  color: #5eead4;
+  border-color: #5eead4;
+}
+
+.agent-tool strong {
+  overflow-wrap: anywhere;
+}
+
+.faq-shell {
+  width: min(1200px, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: 2rem 0 4rem;
+}
+
+.faq-shell a,
+.faq-link,
+.connect-shell a {
+  color: #5eead4;
+}
+
+.faq-header,
+.faq-command-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.faq-topics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.2rem;
+  margin: 1.5rem 0;
+}
+
+.faq-section {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid #294142;
+  scroll-margin-top: 1rem;
+}
+
+.faq-shell p,
+.faq-shell li {
+  line-height: 1.65;
+}
+
+.faq-shell li + li {
+  margin-top: 0.5rem;
+}
+
+.faq-agent-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.faq-agent {
+  min-width: 0;
+  border: 1px solid #294142;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  background: #091617;
+  scroll-margin-top: 1rem;
+}
+
+.faq-agent h3 {
+  margin-top: 0;
+}
+
+.faq-version,
+.faq-copy-status {
+  color: #a9b8b8;
+  font-size: 0.8rem;
+}
+
+.faq-command {
+  margin: 1rem 0;
+}
+
+.faq-command-heading {
+  font-size: 0.8rem;
+  color: #b8caca;
+}
+
+.faq-command button {
+  padding: 0.35rem 0.6rem;
+}
+
+.faq-command pre {
+  margin-top: 0.4rem;
+}
+
+.faq-section details {
+  margin: 1rem 0;
+}
+
+.faq-section summary {
+  cursor: pointer;
+}
+
+@media (max-width: 760px) {
+  .faq-agent-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.app-shell > header {
+  flex-wrap: wrap;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}

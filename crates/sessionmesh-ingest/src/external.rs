@@ -1,5 +1,7 @@
 //! Read-only snapshot adapters for JSON/JSONL agent session stores.
 
+mod grok;
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -23,6 +25,8 @@ pub enum ExternalTool {
     Continue,
     /// Antigravity CLI prompt history.
     Agy,
+    /// Grok Build ACP conversation updates.
+    Grok,
 }
 
 impl ExternalTool {
@@ -31,12 +35,13 @@ impl ExternalTool {
             Self::ClaudeCode => "claude-code",
             Self::Continue => "continue",
             Self::Agy => "agy",
+            Self::Grok => "grok",
         }
     }
 
     fn surface(self) -> &'static str {
         match self {
-            Self::ClaudeCode | Self::Agy => "cli",
+            Self::ClaudeCode | Self::Agy | Self::Grok => "cli",
             Self::Continue => "ide",
         }
     }
@@ -107,6 +112,12 @@ pub fn discover_agy(home: &Path, original_home: &Path) -> Vec<ExternalSource> {
         .collect()
 }
 
+/// Discovers only Grok Build's authoritative session update logs.
+#[must_use]
+pub fn discover_grok(home: &Path, original_home: &Path) -> Vec<ExternalSource> {
+    grok::discover(home, original_home)
+}
+
 /// Stable source identity used to key the ingestion cursor, before any
 /// server-side collector scoping.
 #[must_use]
@@ -165,7 +176,10 @@ pub async fn prepare_external(
     imported_at: &str,
     prior_cursor: Option<&IngestionCursor>,
 ) -> Result<Option<IngestionBatch>, ExternalError> {
-    if matches!(source.tool, ExternalTool::ClaudeCode | ExternalTool::Agy) {
+    if matches!(
+        source.tool,
+        ExternalTool::ClaudeCode | ExternalTool::Agy | ExternalTool::Grok
+    ) {
         return prepare_jsonl_append(source, imported_at, prior_cursor).await;
     }
     let metadata = tokio::fs::metadata(&source.path).await?;
@@ -192,6 +206,7 @@ pub async fn prepare_external(
             0,
             0,
         )?,
+        ExternalTool::Grok => grok::parse(&bytes, source, &stable_generation, 0, 0)?,
         ExternalTool::Continue => {
             parse_continue(&bytes, source, &stable_generation, &fallback_timestamp)?
         }
@@ -287,6 +302,14 @@ async fn prepare_jsonl_append(
             source,
             &stable_generation,
             &fallback_timestamp,
+            start_offset,
+            start_sequence,
+        )?
+    } else if source.tool == ExternalTool::Grok {
+        grok::parse(
+            &bytes,
+            source,
+            &stable_generation,
             start_offset,
             start_sequence,
         )?

@@ -1,0 +1,11 @@
+{
+  "name": "sessionmesh",
+  "owner": { "name": "SessionMesh contributors" },
+  "plugins": [
+    {
+      "name": "sessionmesh",
+      "source": "./plugins/sessionmesh",
+      "description": "Continue sessions of other coding agents in Claude Code through SessionMesh."
+    }
+  ]
+}

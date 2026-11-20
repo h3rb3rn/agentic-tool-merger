@@ -17,6 +17,7 @@ import {
   ApiError,
 } from "./api";
 import { eventLabel, mergeChronologicalEvents } from "./timeline";
+import { Faq } from "./Faq";
 
 export interface AppProps {
   client?: SessionMeshClient;
@@ -32,6 +33,21 @@ export function App({ client }: AppProps) {
   const [token, setToken] = useState(
     () => sessionStorage.getItem("api-token") ?? "",
   );
+  const [showFaq, setShowFaq] = useState(() =>
+    window.location.hash.startsWith("#faq"),
+  );
+  const [hasVisitedSessions, setHasVisitedSessions] = useState(
+    () => !window.location.hash.startsWith("#faq"),
+  );
+  useEffect(() => {
+    const updatePage = () => {
+      const faq = window.location.hash.startsWith("#faq");
+      setShowFaq(faq);
+      if (!faq) setHasVisitedSessions(true);
+    };
+    window.addEventListener("hashchange", updatePage);
+    return () => window.removeEventListener("hashchange", updatePage);
+  }, []);
   const [authMessage, setAuthMessage] = useState("");
   const disconnect = (message = "") => {
     sessionStorage.removeItem("api-token");
@@ -57,12 +73,17 @@ export function App({ client }: AppProps) {
     [client, token, queryClient],
   );
 
-  if (!activeClient) {
-    return <TokenSetup onSave={setToken} message={authMessage} />;
-  }
   return (
     <QueryClientProvider client={queryClient}>
-      <Timeline client={activeClient} onDisconnect={() => disconnect()} />
+      {activeClient && hasVisitedSessions && (
+        <div hidden={showFaq}>
+          <Timeline client={activeClient} onDisconnect={() => disconnect()} />
+        </div>
+      )}
+      {!activeClient && !showFaq && (
+        <TokenSetup onSave={setToken} message={authMessage} />
+      )}
+      {showFaq && <Faq />}
     </QueryClientProvider>
   );
 }
@@ -88,6 +109,9 @@ function TokenSetup({
       <p className="eyebrow">LOCAL AUTHENTICATION</p>
       <h1>SessionMesh</h1>
       <p>Enter the token from your SessionMesh home. It remains in this tab.</p>
+      <p>
+        <a href="#faq">FAQ: sessions and agent handoffs</a>
+      </p>
       {message && <p role="alert">{message}</p>}
       <p>Read the current token on the host:</p>
       <pre>
@@ -209,9 +233,21 @@ function Timeline({
     "none" | "topic" | "date" | "size"
   >("date");
   const [sessionFilter, setSessionFilter] = useState("");
+  const [sessionCursors, setSessionCursors] = useState<
+    Array<string | undefined>
+  >([undefined]);
+  const [selectedTool, setSelectedTool] = useState("");
+  const nativeTools = useQuery({
+    queryKey: ["session-tools"],
+    queryFn: () => client.listSessionTools(),
+    refetchInterval: 30_000,
+  });
+  const activeTool = selectedTool || nativeTools.data?.[0]?.tool_family || "";
+  const sessionCursor = sessionCursors.at(-1);
   const sessions = useQuery({
-    queryKey: ["sessions"],
-    queryFn: () => client.listSessions(),
+    queryKey: ["sessions", activeTool, sessionCursor],
+    queryFn: () => client.listSessions(sessionCursor, activeTool || undefined),
+    enabled: Boolean(activeTool),
   });
   const effectiveId = selectedId || sessions.data?.items[0]?.id || "";
   const selectedSession = sessions.data?.items.find(
@@ -226,10 +262,34 @@ function Timeline({
       ),
     );
   }, [sessionFilter, sessions.data?.items]);
-  const sessionBranches = useMemo(
-    () => sessionTree(visibleSessions, sessionSort, sessionGroup),
-    [sessionGroup, sessionSort, visibleSessions],
-  );
+  const sessionBranches = useMemo(() => {
+    const branches = new Map(
+      sessionTree(visibleSessions, sessionSort, sessionGroup).map((branch) => [
+        branch.tool,
+        branch,
+      ]),
+    );
+    for (const tool of nativeTools.data ?? []) {
+      branches.set(tool.tool_family, {
+        tool: tool.tool_family,
+        count: tool.session_count,
+        groups: branches.get(tool.tool_family)?.groups ?? [],
+      });
+    }
+    return [...branches.values()].sort((left, right) =>
+      left.tool.localeCompare(right.tool),
+    );
+  }, [visibleSessions, sessionSort, sessionGroup, nativeTools.data]);
+  const activeBranch =
+    sessionBranches.find(
+      (branch) => branch.tool === activeTool && branch.groups.length > 0,
+    ) ??
+    sessionBranches.find((branch) =>
+      branch.groups.some((group) =>
+        group.sessions.some((session) => session.id === effectiveId),
+      ),
+    ) ??
+    sessionBranches.find((branch) => branch.groups.length > 0);
   const eventScope = JSON.stringify([effectiveId, kind]);
   const pageCursors =
     eventPages.scope === eventScope ? eventPages.cursors : [undefined];
@@ -291,16 +351,21 @@ function Timeline({
   return (
     <main className="app-shell">
       <header>
-        <button type="button" onClick={onDisconnect}>
-          Change API token
-        </button>
         <div>
           <p className="eyebrow">LOCAL-FIRST SESSION OBSERVABILITY</p>
           <h1>SessionMesh</h1>
         </div>
-        <span className={connected ? "connection live" : "connection stale"}>
-          {connected ? "Live" : "Reconnecting — showing stale data"}
-        </span>
+        <nav aria-label="Page navigation" className="header-actions">
+          <a href="#faq" className="faq-link">
+            FAQ
+          </a>
+          <button type="button" onClick={onDisconnect}>
+            Change API token
+          </button>
+          <span className={connected ? "connection live" : "connection stale"}>
+            {connected ? "Live" : "Reconnecting — showing stale data"}
+          </span>
+        </nav>
       </header>
       <div className="workspace">
         <aside aria-label="Native sessions">
@@ -308,6 +373,25 @@ function Timeline({
             <h2>Sessions</h2>
             <span>{visibleSessions.length}</span>
           </div>
+          <nav aria-label="Agent tools" className="agent-tools">
+            {sessionBranches.map((branch) => (
+              <button
+                type="button"
+                className="agent-tool"
+                key={branch.tool}
+                aria-pressed={activeTool === branch.tool}
+                aria-label={`${branch.tool} (${branch.count} sessions)`}
+                onClick={() => {
+                  setSelectedTool(branch.tool);
+                  setSessionCursors([undefined]);
+                  setSelectedId("");
+                }}
+              >
+                <strong>{branch.tool}</strong>
+                <span>{branch.count}</span>
+              </button>
+            ))}
+          </nav>
           <label className="session-filter">
             Filter sessions
             <input
@@ -350,7 +434,10 @@ function Timeline({
               </select>
             </label>
           </div>
-          {sessions.isPending && <p role="status">Loading sessions…</p>}
+          {(nativeTools.isPending ||
+            (Boolean(activeTool) && sessions.isPending)) && (
+            <p role="status">Loading sessions…</p>
+          )}
           {sessions.isError && (
             <ErrorState
               message={
@@ -361,24 +448,36 @@ function Timeline({
               retry={sessions.refetch}
             />
           )}
-          {sessions.data?.items.length === 0 && <p>No native sessions found</p>}
+          {(sessions.data?.items.length === 0 ||
+            nativeTools.data?.length === 0) && <p>No native sessions found</p>}
           {sessions.data && visibleSessions.length === 0 && (
             <p>No sessions match this filter</p>
           )}
+          {nativeTools.isError && (
+            <ErrorState
+              message="Agent tool navigation is temporarily unavailable"
+              retry={nativeTools.refetch}
+            />
+          )}
           <nav aria-label="Session hierarchy">
-            {sessionBranches.map((branch) => {
+            {(activeBranch ? [activeBranch] : []).map((branch) => {
               const branchIsActive = branch.groups.some((group) =>
                 group.sessions.some((session) => session.id === effectiveId),
               );
               return (
                 <details
                   className="tool-branch"
-                  open={branchIsActive || Boolean(sessionFilter) || undefined}
+                  open={
+                    activeTool === branch.tool ||
+                    branchIsActive ||
+                    Boolean(sessionFilter) ||
+                    undefined
+                  }
                   key={`${branch.tool}:${sessionFilter}`}
                 >
                   <summary>
-                    <strong>{branch.tool}</strong>
-                    <span>{branch.count}</span>
+                    <strong>Sessions</strong>
+                    <span>{visibleSessions.length}</span>
                   </summary>
                   {branch.groups.map((group) => {
                     const groupIsActive = group.sessions.some(
@@ -422,6 +521,36 @@ function Timeline({
                       </details>
                     );
                   })}
+                  {(activeTool === branch.tool ||
+                    (!activeTool && branchIsActive)) && (
+                    <nav aria-label="Session pages">
+                      <button
+                        type="button"
+                        disabled={
+                          sessionCursors.length <= 1 || sessions.isPending
+                        }
+                        onClick={() =>
+                          setSessionCursors(sessionCursors.slice(0, -1))
+                        }
+                      >
+                        Previous sessions
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          !sessions.data?.next_cursor || sessions.isPending
+                        }
+                        onClick={() =>
+                          setSessionCursors([
+                            ...sessionCursors,
+                            sessions.data!.next_cursor!,
+                          ])
+                        }
+                      >
+                        Next sessions
+                      </button>
+                    </nav>
+                  )}
                 </details>
               );
             })}
@@ -475,7 +604,11 @@ function Timeline({
                   <li key={result.event_id}>
                     <button
                       type="button"
-                      onClick={() => setSelectedId(result.native_session_id)}
+                      onClick={() => {
+                        setSelectedTool(result.tool_family);
+                        setSessionCursors([undefined]);
+                        setSelectedId(result.native_session_id);
+                      }}
                     >
                       <span className="tool-badge">{result.tool_family}</span>
                       <strong>{result.native_session_id}</strong>
@@ -712,11 +845,13 @@ function CorrelationReview({
           </div>
           <div className="correlation-pair">
             <CorrelationSession
+              client={client}
               session={sessionsById.get(candidate.left_native_session_id)}
               nativeId={candidate.left_native_session_id}
             />
             <span aria-hidden="true">↔</span>
             <CorrelationSession
+              client={client}
               session={sessionsById.get(candidate.right_native_session_id)}
               nativeId={candidate.right_native_session_id}
             />
@@ -768,17 +903,30 @@ function CorrelationReview({
 }
 
 function CorrelationSession({
-  session,
+  session: pageSession,
   nativeId,
+  client,
 }: {
   session: NativeSession | undefined;
   nativeId: string;
+  client: SessionMeshClient;
 }) {
+  // Only the visible candidate cards fetch metadata missing from the current tool page.
+  const metadata = useQuery({
+    queryKey: ["session-summary", nativeId],
+    queryFn: () => client.getSession(nativeId),
+    enabled: !pageSession,
+  });
+  const session = pageSession ?? metadata.data;
   if (!session) {
     return (
       <div className="correlation-session">
         <strong>{nativeId}</strong>
-        <small>Session metadata unavailable</small>
+        <small>
+          {metadata.isPending
+            ? "Loading session metadata…"
+            : "Session metadata unavailable"}
+        </small>
       </div>
     );
   }
@@ -1058,7 +1206,24 @@ function EventContent({ detail }: { detail: CanonicalEvent }) {
   ];
   const values = preferredFields
     .map((field) => [field, detail.payload[field]] as const)
-    .filter((entry) => entry[1] !== undefined && entry[1] !== null);
+    .filter(([field, value]) => {
+      if (value === undefined || value === null) return false;
+      if (
+        field !== "content" ||
+        typeof value !== "object" ||
+        Array.isArray(value)
+      )
+        return true;
+      // Grok keeps the original content envelope alongside normalized text.
+      // Show that text once; full canonical evidence remains expandable below.
+      return !(
+        "type" in value &&
+        value.type === "text" &&
+        "text" in value &&
+        value.text === detail.payload.text &&
+        Object.keys(value).every((key) => key === "type" || key === "text")
+      );
+    });
   const sourcePath = String(detail.provenance.source_path ?? "Unknown source");
   return (
     <section className="event-content" aria-label="Event content">

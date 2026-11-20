@@ -16,3 +16,4 @@ captured by a new ADR that supersedes the previous one.
 | [009](009-chronology-uses-multiple-ordering-signals.md)    | Chronology uses multiple ordering signals           | Accepted |
 | [010](010-derived-state-is-maintained-incrementally.md)    | Derived state is maintained incrementally           | Accepted |
 | [011](011-conversation-retention-and-bounded-resources.md) | Conversation retention and bounded resources        | Accepted |
+| [012](012-handoff-separates-observations-from-tasks.md)    | Handoffs separate observations from tasks           | Accepted |

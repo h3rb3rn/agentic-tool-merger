@@ -208,6 +208,11 @@ of expanding it with the rest of the archive. A full live page offers
 through at most four concurrent detail requests. Individual failures show a
 visible error and **Retry**; changing pages cancels obsolete requests.
 
+The Web UI's **FAQ** link provides per-client resume commands and copyable
+cross-client handoff commands, including rate-limit recovery. It is also
+available before login at `/#faq`. See the
+[session handoff FAQ](session-handoffs.md) for the full reference.
+
 ## Normal daily use
 
 Always start an agent from the project directory:
@@ -295,10 +300,15 @@ transcript.
 
 ## Import coverage
 
-MCP delivery and transcript import are separate capabilities. OpenCode sessions
-and Agy prompt history can be imported. Complete Agy assistant trajectories
-and a Grok transcript importer are not implemented by this connector setup.
-Grok can still retrieve context produced from supported sources.
+MCP delivery and transcript import are separate capabilities. OpenCode sessions,
+Agy prompt history and Grok Build conversation updates can be imported. Grok
+prompts, replies and reasoning appear under `grok`; its sessions also contribute
+to shared handoffs. Every imported agent remains visible in the selector above the left session
+list. Click an agent
+to load its sessions directly. **Next sessions** and **Previous sessions** browse
+additional sessions inside that agent. Complete Agy assistant trajectories remain outside
+the current import coverage. See the
+[Grok Build import contract](../integrations/automatic-delivery.md#grok-build-import).
 
 ## Troubleshooting
 

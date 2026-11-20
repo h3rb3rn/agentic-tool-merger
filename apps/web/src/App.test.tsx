@@ -47,6 +47,17 @@ const events: EventSummary[] = [
 
 function client(overrides: Partial<SessionMeshClient> = {}): SessionMeshClient {
   return {
+    getSession: vi.fn().mockImplementation((id: string) =>
+      Promise.resolve({
+        ...sessions[0],
+        id,
+        thread_title: id,
+        tool_family: id.split(":")[0],
+      }),
+    ),
+    listSessionTools: vi
+      .fn()
+      .mockResolvedValue([{ tool_family: "codex", session_count: 1 }]),
     listSessions: vi
       .fn()
       .mockResolvedValue({ items: sessions, next_cursor: null }),
@@ -341,11 +352,11 @@ describe("Session timeline", () => {
 
     expect(await screen.findByText("78% match")).toBeInTheDocument();
     expect(
-      screen.getAllByText("Plan canonical event migration"),
+      await screen.findAllByText("Plan canonical event migration"),
     ).not.toHaveLength(0);
-    expect(screen.getAllByText("Implement event repository")).not.toHaveLength(
-      0,
-    );
+    expect(
+      await screen.findAllByText("Implement event repository"),
+    ).not.toHaveLength(0);
     expect(screen.getByText("agy · CLI")).toBeInTheDocument();
     expect(screen.getByText("opencode · CLI")).toBeInTheDocument();
     expect(screen.getByText("Workspace match: true")).toBeInTheDocument();
@@ -563,4 +574,179 @@ describe("saved API token recovery", () => {
     ).toBeInTheDocument();
     expect(sessionStorage.getItem("api-token")).toBe("replacement-token");
   });
+});
+
+describe("session archive pages", () => {
+  it("pages inside one agent while preserving its selection", async () => {
+    const api = client({
+      listSessionTools: vi
+        .fn()
+        .mockResolvedValue([{ tool_family: "grok", session_count: 205 }]),
+      listSessions: vi.fn().mockImplementation((cursor) =>
+        Promise.resolve({
+          items: [
+            {
+              ...sessions[0],
+              id: cursor ? "grok:later" : "grok:first",
+              tool_family: "grok",
+              thread_title: cursor
+                ? "Later Grok conversation"
+                : "Initial Grok conversation",
+            },
+          ],
+          next_cursor: cursor ? null : "session-next",
+        }),
+      ),
+    });
+    render(<App client={api} />);
+    await screen.findByRole("button", { name: /Initial Grok conversation/ });
+    fireEvent.click(screen.getByRole("button", { name: "Next sessions" }));
+    expect(
+      await screen.findByRole("button", { name: /Later Grok conversation/ }),
+    ).toBeInTheDocument();
+    expect(api.listSessions).toHaveBeenLastCalledWith("session-next", "grok");
+    fireEvent.click(screen.getByRole("button", { name: "Previous sessions" }));
+    expect(
+      await screen.findByRole("button", { name: /Initial Grok conversation/ }),
+    ).toBeInTheDocument();
+  });
+});
+
+it("renders normalized Grok text once while retaining canonical content evidence", async () => {
+  const api = client({
+    getEvent: vi.fn().mockResolvedValue({
+      ...events[0],
+      schema_version: "1.0",
+      payload: {
+        text: "Grok reply",
+        content: { type: "text", text: "Grok reply" },
+      },
+      provenance: {},
+    }),
+  });
+  const { container } = render(<App client={api} />);
+  await screen.findByText("Tool Call");
+  fireEvent.click(
+    screen.getAllByRole("button", { name: "Reveal event data" })[0],
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Reveal now" }));
+  expect(await screen.findAllByText("Grok reply")).toHaveLength(1);
+  expect(container.querySelectorAll(".event-content > div")).toHaveLength(1);
+  expect(container.querySelector(".event-content details")).toHaveTextContent(
+    '"type": "text"',
+  );
+});
+
+it("keeps every agent tool visible while loading only the selected tool's sessions", async () => {
+  const tools = ["agy", "claude-code", "codex", "continue", "grok", "opencode"];
+  const api = client({
+    listSessionTools: vi.fn().mockResolvedValue(
+      tools.map((tool_family) => ({
+        tool_family,
+        session_count: tool_family === "grok" ? 205 : 40,
+      })),
+    ),
+    listSessions: vi.fn().mockImplementation((_cursor, tool) =>
+      Promise.resolve({
+        items:
+          tool === "opencode"
+            ? [
+                {
+                  ...sessions[0],
+                  id: "opencode:s",
+                  tool_family: "opencode",
+                  thread_title: "OpenCode conversation",
+                },
+              ]
+            : sessions,
+        next_cursor: tool === "opencode" ? null : "archive-next",
+      }),
+    ),
+  });
+  render(<App client={api} />);
+  for (const tool of tools)
+    expect(
+      await screen.findByText(tool, {
+        selector: ".agent-tool > strong",
+      }),
+    ).toBeInTheDocument();
+  fireEvent.click(
+    screen.getByRole("button", { name: "opencode (40 sessions)" }),
+  );
+  expect(
+    await screen.findByRole("button", { name: /OpenCode conversation/ }),
+  ).toBeInTheDocument();
+  expect(api.listSessions).toHaveBeenLastCalledWith(undefined, "opencode");
+  for (const tool of tools)
+    expect(
+      screen.getByText(tool, { selector: ".agent-tool > strong" }),
+    ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Next sessions" })).toBeDisabled();
+});
+
+it("loads correlation metadata outside the selected agent without loading its full session page", async () => {
+  const api = client({
+    getSession: vi.fn().mockResolvedValue({
+      ...sessions[0],
+      id: "opencode:peer",
+      tool_family: "opencode",
+      thread_title: "OpenCode peer",
+    }),
+    listCorrelationCandidates: vi.fn().mockResolvedValue([
+      {
+        id: "cross-tool",
+        left_native_session_id: sessions[0].id,
+        right_native_session_id: "opencode:peer",
+        target_global_session_id: null,
+        score: 0.7,
+        status: "pending",
+        evidence: [],
+      },
+    ]),
+  });
+  render(<App client={api} />);
+  expect(await screen.findByText("OpenCode peer")).toBeInTheDocument();
+  expect(api.getSession).toHaveBeenCalledWith("opencode:peer");
+  expect(api.listSessions).toHaveBeenLastCalledWith(undefined, "codex");
+});
+
+it("opens the FAQ without authentication or API requests", async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  window.history.replaceState(null, "", "/#faq");
+  render(<App />);
+  expect(
+    screen.getByRole("heading", { name: "FAQ: sessions and agent handoffs" }),
+  ).toBeInTheDocument();
+  expect(fetch).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});
+
+it("keeps session navigation state while opening and closing the FAQ", async () => {
+  const api = client();
+  render(<App client={api} />);
+  const session = await screen.findByRole("button", {
+    name: /Implement session timeline/,
+  });
+  fireEvent.click(session);
+  fireEvent.click(screen.getByRole("link", { name: "FAQ" }));
+  await screen.findByRole("heading", {
+    name: "FAQ: sessions and agent handoffs",
+  });
+  fireEvent.click(screen.getByRole("link", { name: "Back to sessions" }));
+  await screen.findByRole("button", { name: /Implement session timeline/ });
+  expect(api.listSessions).toHaveBeenCalledTimes(1);
+  expect(window.location.search).toContain("session=");
+});
+
+it("opens a direct FAQ link with a saved login without loading the session archive", () => {
+  window.history.replaceState(null, "", "/#faq-agent-opencode");
+  sessionStorage.setItem("api-token", "saved-test-token");
+  const api = client();
+  render(<App client={api} />);
+  expect(
+    screen.getByRole("heading", { name: "FAQ: sessions and agent handoffs" }),
+  ).toBeInTheDocument();
+  expect(api.listSessionTools).not.toHaveBeenCalled();
+  expect(api.listSessions).not.toHaveBeenCalled();
 });

@@ -670,3 +670,267 @@ token reset also passes. An intercepted HTTP 500 preserved the token, displayed
 its status and recovered through Retry after the interception was removed.
 There were zero JavaScript errors. Credentials/session text were not logged.
 Changes are published on `fix/gui-auth-recovery`; the state volume is preserved.
+
+## Grok Build import — 2026-11-20
+
+The user explicitly requested Grok Build implementation. Previous integration
+provided only outbound MCP context. Installed Grok Build 1.0.89 documentation
+and local file-shape inspection identify `updates.jsonl` as the authoritative
+conversation log; `chat_history.jsonl` reflects model context/compaction.
+There are 156 native update logs totaling approximately 615 MB at inspection.
+No private conversation or credential contents are copied into fixtures/docs.
+The exposed SessionMesh MCP transport is still closed; state is verified locally.
+
+Implemented exact-depth, read-only discovery in daemon and collector, bounded
+append parsing of user/assistant/thought chunks, URL-encoded and `.cwd` workspace
+mapping, native-time precedence, deterministic provenance and incremental
+cursors. Nonconversation operational/tool updates are not another persistent
+code history. Unknown native attachment content is preserved in the original
+content object and raw evidence. Native stores remain read-only.
+
+Focused integration tests failed before the adapter existed. They now cover
+mixed conversation/tool records, Unicode/code preservation, partial appends,
+stable identity, original path/byte offset, long-CWD sidecars, explicit malformed
+records, bounded batches/oversized replies and replacement. A daemon integration
+test verifies discovery through global-session handoff without source changes.
+A GUI regression failed before adding archive cursor navigation to reach Grok
+sessions beyond the first 200 records. Runtime deployment verification follows.
+
+A read-only scan of the real archive found 979 user chunks, 3,154 assistant
+chunks and 11,126 thought chunks, plus one malformed complete JSON line at byte
+2,359,716 in one source. That source is intentionally not advanced through the
+corrupt batch, and its native data remains unchanged. Open operational task:
+resolve or explicitly quarantine that damaged native record through a verified,
+lossless error-reporting design; do not silently skip it or rewrite the source.
+Other sources continue independently. A GUI regression also caught duplicate
+presentation of normalized text and its original Grok content envelope. The
+presentation now shows text once while retaining expandable canonical evidence;
+persisted event identities/content are unchanged.
+
+Final validation: all 163 Rust workspace tests/doc tests, formatting and strict
+Clippy pass. All 22 web tests and twelve repository/schema/security tests pass,
+alongside ESLint, TypeScript, production build and strict MkDocs. The feature
+branch was synchronized with remote main `32bcb95`; rebasing preserved the exact
+tested file tree. The updated image
+`sha256:0a9b330a55827fffe423b81a56d1c1e42ed5095b109f85aee61c23f469685394`
+is deployed and healthy with its existing state volume and resource limits.
+
+Authenticated production API inspection counted 152 Grok sessions and 15,046
+retained conversation chunks. A canonical assistant-detail probe verified text,
+workspace and original update-log provenance without logging contents. Headless
+Chromium navigated to a later session page, selected a Grok conversation and
+loaded all 76 visible event contents, including conversation messages, with zero
+JavaScript errors. Fresh MCP negotiation, all five tools and the current
+workspace handoff pass. The malformed native source remains blocked and is not
+reported as a successful complete archive import. A post-recreation sample used
+92.65 MiB of the 1 GiB limit; it is not a long-running memory-soak result.
+Changes are published on `feat/grok-build-import`; main is not modified.
+
+## Persistent agent navigation — 2026-11-20
+
+The user reported OpenCode disappearing and explicitly requested all agent tools
+in the left navigation without switching pages. Production API verification
+found all 40 OpenCode sessions intact. The first 200-session page contained
+Codex/Agy/Claude/Continue and 21 Grok sessions; the UI incorrectly derived the
+agent tree from that page. Archive paging fixed reachability but did not satisfy
+persistent tool visibility.
+
+A focused API regression failed before the new inventory route existed, and a
+GUI regression failed because later tools were absent. The storage layer now
+aggregates family/session counts without loading events or enumerating complete
+session summaries. The authenticated inventory keeps all agent headings visible
+in a compact selector above the independently scrolling session list. Selecting
+an agent resets session cursors
+and loads that family's sessions through the existing server filter. Paging
+controls live within the active branch; cross-tool search also updates scope.
+Visible correlation cards retrieve individual metadata summaries for peers
+outside the chosen agent, keeping paired context available without loading
+other full session pages.
+The inventory refreshes every 30 seconds. Payload paging and four-request detail
+limits remain in effect. No session data is removed or re-imported for this fix.
+The exposed MCP transport was closed at the session-start handoff attempt;
+confirmed state and changes are recorded here.
+
+Final validation: all 164 Rust workspace tests/doc tests, formatting and strict
+Clippy pass. All 24 web tests, twelve repository/schema/security tests, lint,
+TypeScript, production build and strict MkDocs pass. The deployed image is
+`sha256:6a7f37fde83b06885253bbdf1548c5796fbaf80c182b4a349e3c6e4ea1c4cf30`.
+The container is healthy and its existing state volume is preserved.
+
+The real Chromium check found all six imported agents (Agy, Claude Code, Codex,
+Continue, Grok and OpenCode) in the selector without paging. All entries fit
+inside both the desktop and mobile viewport above the session list. Selecting
+OpenCode displayed its 40 sessions and loaded conversation contents; switching
+to Grok retained all agent entries, with 152 Grok sessions available. Every
+session-page request was scoped to an agent. There were no speculative event
+payload requests before disclosure and zero JavaScript errors. Health and a
+fresh MCP five-tool/workspace-handoff check pass. The change is published on
+`fix/all-tools-navigation` without modifying main.
+
+## Web FAQ and cross-client continuation — 2026-11-20
+
+The user requested a Web UI FAQ with per-agent native resume and SessionMesh
+context commands, including continuation in another client after a rate limit.
+All six clients' syntax was checked against installed CLI help: Codex 0.170.0,
+Claude Code 2.1.328, Agy 1.5.13, OpenCode 2.2.7, Grok Build 1.0.89 and Continue
+CLI 1.5.43. OpenCode help required temporary XDG directories because its default
+log path is read-only; real client settings, histories and credentials were not
+changed. No model sessions were started to validate documentation commands.
+
+The static FAQ explains native-history ownership, new-session handoffs,
+workspace/membership verification, search provenance, provider-quota boundaries
+and coverage gaps. It uses the actual MCP read schema and documents Continue's
+boolean resume flag and OpenCode's existing-ID requirement. It includes
+copyable shell commands and clearly labelled in-agent prompts for each client.
+Header and login links use FAQ hash routes/section anchors. The prior timeline
+stays mounted when visited and is restored on return; a direct FAQ visit avoids
+private archive requests even with a saved login. Clipboard denial or HTTP
+secure-context restrictions produce explicit text-selection/manual-copy guidance.
+
+Focused tests failed before implementation for the absent FAQ/navigation.
+Coverage now verifies all client guides, rate-limit workflow, native/cross-client
+semantics, copy selection, public/no-fetch routing and preserved timeline state.
+The exposed SessionMesh MCP transport was closed at the initial handoff attempt;
+confirmed facts and changes are persisted in this ledger and canonical docs.
+
+Validation passes: all 31 web tests and twelve repository/schema/security tests,
+formatting, ESLint, TypeScript, production build and strict MkDocs. Rust and API
+behavior are unchanged. The deployed image is
+`sha256:67ed385bd375c0173c0a3f7e38b317f54c4f342d37eb72109f67e00e5b298623`;
+Compose and HTTP health are healthy and the state volume is preserved.
+
+A real Chromium check loaded all six client guides without authentication and
+made no private API requests, including after reloading a direct FAQ link with
+a saved login. HTTP-origin command selection/manual-copy guidance, agent section
+anchors and mobile width checks pass. After authenticated OpenCode navigation,
+returning from the FAQ preserved the native session, filter, sort and grouping
+without another session-page fetch. JavaScript errors were zero. No conversation
+or credentials were printed. Fresh MCP negotiation, five tools and workspace
+handoff delivery pass. Changes are published on `feat/web-faq-session-handoffs`
+without modifying main.
+
+## Handoff observation separation — 2026-11-20
+
+The user reported that a SessionMesh handoff presented their question as an open
+task and a full chat answer as completed work. MCP read tools were verified live
+(`get_current`, `get_handoff`, `search`); write tools were not exercised to avoid
+polluting shared context.
+
+Verified cause: `extract_facts` in `sessionmesh-handoff` promoted the latest user
+message to `open_tasks` and the latest assistant message to `completed` whenever
+no explicit task/plan events existed, and `phase`/`completion`/`next_action` were
+derived from them. The behavior was undocumented and conflicted with the rule
+that observations, decisions, and instructions stay distinct. Simply removing it
+would have made `generate()` fail with `MissingProvenance` for sessions without
+explicit tasks.
+
+The user approved the recommended design (ADR-012): schema 1.1 with optional
+`latest_user_request` / `latest_assistant_reply` observations carrying
+provenance, no message promotion into tasks or completed work, phase `unknown`
+without explicit state, and unchanged readability of 1.0 documents.
+
+Tests were written first and failed to compile/pass before the change. Added
+coverage: messages are never tasks or completed work, observations coexist with
+explicit tasks, redaction, explicit completed tasks, 1.0 round-trip, budget
+pressure ordering, and schema acceptance of 1.0/1.1 plus rejection of invalid
+observations. One new budget test initially failed because of its own scenario
+(the only provenance source cannot be dropped); the scenario was corrected, not
+the invariant.
+
+Validation: all workspace tests except `sessionmesh-mcp` pass (see below), Clippy
+with warnings denied passes for handoff and API, formatting passes, 14 Node
+contract tests pass, and `mkdocs build --strict` succeeds.
+
+Not done: the running container still serves the previous image, so live
+handoffs keep the old behavior until the image is rebuilt and deployed. Stored
+1.0 snapshots are not rewritten; they are replaced at the next reconciliation.
+Nothing was committed (initial-commit gate and branch policy unchanged).
+
+Work in progress (separate from this fix): the Claude Code plugin for continuing
+other tools' sessions requires two read-only MCP tools, `sessionmesh_list_sessions`
+and `sessionmesh_get_session`. Their tests are already in
+`crates/sessionmesh-mcp/src/lib.rs` and fail until implemented, so the MCP crate
+is intentionally red at this point.
+
+## Claude Code plugin — 2026-11-20
+
+The user asked for a Claude Code plugin that loads SessionMesh sessions into a
+new session to continue work started in other agentic tools. The existing MCP
+server only exposed the current workspace's global session and metadata-only
+search, so it could neither choose a session nor read its messages. The plugin
+therefore required two read-only MCP tools (ADR-006: MCP stays the integration
+layer; no REST token handling in the plugin).
+
+Implemented test-first: `Storage::recent_native_sessions` and
+`Storage::recent_conversation`, `sessionmesh_list_sessions` and
+`sessionmesh_get_session` (redacted via the shared handoff boundary, bounded,
+untrusted and ingestion-excluded), the `plugins/sessionmesh` plugin with two
+read-only commands and the bundled bridge, a marketplace manifest, and a Node
+contract test that checks manifest, bridge parity, read-only tool allowlist and
+the untrusted-data instructions. `claude plugin validate` passes.
+
+Validation: Rust tests for storage and MCP pass (including recency ordering,
+filtering, paging, truncation, redaction, unknown-session and invalid-argument
+errors); connector regression suite and plugin contract tests pass.
+
+Not verified: the plugin was not loaded into a live Claude Code session, and the
+running container still serves the previous image without the new tools. The
+live MCP check requires seven tools and will fail against the old image until it
+is rebuilt and deployed. Nothing was committed.
+
+### Plugin deployment and ordering correction
+
+The user approved a rebuild. The image was rebuilt with Compose and the
+container recreated; health is `ok` and the named state volume was kept. A live
+probe with a fresh bridge showed seven tools, working `list_sessions` and
+`get_session`, and a schema 1.1 handoff with phase `unknown`, no promoted tasks
+and an optional `latest_user_request`. The coding session's stdio connection
+closed on recreation, as expected.
+
+The probe also exposed a defect in this change: `recent_native_sessions` ordered
+by session start/end columns, which OpenCode, Grok, Agy and Continue never set
+(all `NULL`), so only Codex sessions appeared among the newest 50 and the other
+tools were effectively unreachable. The Claude Code family is named
+`claude-code`, not `claude`, which the first command text used. Regression tests
+failed first (a session with `NULL` times and a later event must rank first);
+ordering now uses the newest event timestamp from the per-session chronology
+index and list items carry `last_activity_at`. The commands and documentation
+name the real families. A second rebuild and live recheck follow.
+
+### Plugin installation and live test
+
+The user asked to install and test the plugin. `claude plugin marketplace add`
+registered this checkout as marketplace `sessionmesh` (declared in user settings)
+and `claude plugin install sessionmesh@sessionmesh` installed version 0.1.0 at
+user scope, read from `plugins/sessionmesh`. Remove it with
+`claude plugin uninstall sessionmesh@sessionmesh` and
+`claude plugin marketplace remove sessionmesh`.
+
+Headless sessions (`claude -p`) verified both commands against the deployed
+service. `/sessionmesh:sessions opencode` listed 20 OpenCode sessions newest
+first with `last_activity_at`, event counts and the continuation cursor.
+`/sessionmesh:continue <id>` loaded an OpenCode session of another project,
+reported its truncation, compared it with the real repository state with
+read-only Git commands, noticed that the session belonged to a different project,
+did not act on an instruction contained in the history, and asked for
+confirmation before any change. No files were modified by the test. Only a
+headless run was exercised; an interactive session with a handoff from a session
+in the same workspace was not.
+
+### Publication of the plugin and handoff fix
+
+The user approved committing and pushing on a feature branch. The source
+checkout's index still pointed at an older commit and its working tree mixed
+several already-published branches, so a clean worktree was created from
+`582008a` (the tip of the unmerged FAQ branch, itself based on current `main`
+`32bcb95`), only the files changed for this work were copied in, and a recursive
+comparison confirmed no other difference besides build artifacts. The sensitive
+data scan of the diff found nothing.
+
+Branch `feat/claude-code-plugin-and-handoff-observations` holds two commits: the
+handoff observation fix (ADR-012) and the plugin with its MCP tools. It is
+stacked on the unmerged `feat/grok-build-import`, `fix/all-tools-navigation` and
+`feat/web-faq-session-handoffs` work, so a pull request must either target the
+FAQ branch or wait until those are merged into `main`. No pull request was opened
+and `main` was not touched. GitHub reports existing dependency advisories on the
+default branch, which remain the open maintenance task recorded earlier.

@@ -372,6 +372,23 @@ impl Storage {
         }))
     }
 
+    /// Counts imported sessions by tool without reading transcript payloads or session pages.
+    ///
+    /// # Errors
+    /// Returns a database or numeric-range error.
+    pub async fn native_session_tool_counts(&self) -> Result<Vec<(String, u64)>, StorageError> {
+        let rows = sqlx::query("SELECT tool_family, COUNT(*) AS session_count FROM native_sessions GROUP BY tool_family ORDER BY tool_family")
+            .fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.get("tool_family"),
+                    to_u64(row.get("session_count"), "session_count")?,
+                ))
+            })
+            .collect()
+    }
+
     /// Reads a bounded identity-ordered native-session page before projecting statistics.
     ///
     /// # Errors
@@ -407,6 +424,97 @@ impl Storage {
                 origin_collector_id: row.get("origin_collector_id"),
             })
             .collect())
+    }
+
+    /// Lists native sessions, most recently active first, using offset paging.
+    ///
+    /// Activity is the timestamp of a session's newest event, read through the
+    /// per-session chronology index. Session start and end columns are not used
+    /// because several importers never set them. The returned text is the
+    /// newest event timestamp, or `None` for a session without events, which
+    /// sorts last. This ordering is a display aid for choosing a session to
+    /// continue; it is not the cross-source event chronology of ADR-009. Only
+    /// metadata is read, never event payloads.
+    ///
+    /// # Errors
+    /// Returns a database error.
+    pub async fn recent_native_sessions(
+        &self,
+        offset: usize,
+        limit: usize,
+        family: Option<&str>,
+    ) -> Result<Vec<(StoredNativeSession, Option<String>)>, StorageError> {
+        const LATEST: &str = "(SELECT {column} FROM event_overviews o WHERE o.native_session_id=s.id ORDER BY o.timestamp_seconds DESC,o.timestamp_nanos DESC LIMIT 1)";
+        let mut query = sqlx::QueryBuilder::<Sqlite>::new(format!(
+            "SELECT s.id,s.tool_family,s.surface,s.profile,s.started_at,s.ended_at,s.origin_collector_id,{} AS last_activity FROM native_sessions s WHERE 1=1",
+            LATEST.replace("{column}", "o.timestamp")
+        ));
+        if let Some(family) = family {
+            query.push(" AND s.tool_family=").push_bind(family);
+        }
+        query
+            .push(format!(
+                " ORDER BY {} DESC, {} DESC, s.id DESC LIMIT ",
+                LATEST.replace("{column}", "o.timestamp_seconds"),
+                LATEST.replace("{column}", "o.timestamp_nanos")
+            ))
+            .push_bind(i64::try_from(limit.min(1001)).unwrap_or(1001))
+            .push(" OFFSET ")
+            .push_bind(i64::try_from(offset).unwrap_or(i64::MAX));
+        let rows = query.build().fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    StoredNativeSession {
+                        id: row.get("id"),
+                        tool_family: row.get("tool_family"),
+                        surface: row.get("surface"),
+                        profile: row.get("profile"),
+                        started_at: row.get("started_at"),
+                        ended_at: row.get("ended_at"),
+                        origin_collector_id: row.get("origin_collector_id"),
+                    },
+                    row.get("last_activity"),
+                )
+            })
+            .collect())
+    }
+
+    /// Loads the newest user and assistant messages of one native session.
+    ///
+    /// Returns at most `limit` messages in chronological order plus whether older
+    /// messages exist. Non-conversation events are excluded, and ordering uses the
+    /// exact chronology index rather than timestamps alone.
+    ///
+    /// # Errors
+    /// Returns a database or canonical serialization error.
+    pub async fn recent_conversation(
+        &self,
+        native_session_id: &str,
+        limit: usize,
+    ) -> Result<(Vec<CanonicalEvent>, bool), StorageError> {
+        let limit = limit.clamp(1, 512);
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT event_id FROM event_overviews
+             WHERE native_session_id=? AND kind IN ('user_message','assistant_message')
+             ORDER BY timestamp_seconds DESC,timestamp_nanos DESC,sequence DESC,source_generation DESC,
+                      source_offset DESC,ingestion_sequence DESC,event_id DESC
+             LIMIT ?",
+        )
+        .bind(native_session_id)
+        .bind(i64::try_from(limit + 1).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?;
+        let truncated = ids.len() > limit;
+        let mut events = Vec::new();
+        for id in ids.into_iter().take(limit) {
+            if let Some(event) = self.get_canonical_event(&id).await? {
+                events.push(event);
+            }
+        }
+        events.reverse();
+        Ok((events, truncated))
     }
 
     /// Resolves the latest audited workspace membership without opening transcript payloads.

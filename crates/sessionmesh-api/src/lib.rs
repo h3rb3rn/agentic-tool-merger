@@ -233,6 +233,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/health", get(health))
         .route("/api/v1/tools", get(tools))
         .route("/api/v1/tools/discover", post(discover_tools))
+        .route("/api/v1/native-session-tools", get(native_session_tools))
         .route("/api/v1/native-sessions", get(native_sessions))
         .route("/api/v1/native-sessions/{id}", get(native_session))
         .route("/api/v1/events", get(events))
@@ -320,6 +321,33 @@ pub struct Page<T> {
     pub items: Vec<T>,
     /// Cursor for the next page.
     pub next_cursor: Option<String>,
+}
+
+/// Complete payload-free navigation inventory, independent of session pagination.
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionToolSummary {
+    /// Imported agent family identifier.
+    pub tool_family: String,
+    /// Total native sessions for this family across all pages.
+    pub session_count: u64,
+}
+
+/// Exposes all imported tool families through one authenticated metadata query.
+async fn native_session_tools(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SessionToolSummary>>, ApiError> {
+    authorize(&state, &headers)?;
+    let tools = state.storage.native_session_tool_counts().await?;
+    Ok(Json(
+        tools
+            .into_iter()
+            .map(|(tool_family, session_count)| SessionToolSummary {
+                tool_family,
+                session_count,
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1793,6 +1821,41 @@ mod tests {
         assert_eq!(health.status(), StatusCode::OK);
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(json(unauthorized).await["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn session_tool_inventory_is_authenticated_and_spans_session_pages() {
+        let (_directory, state) = state().await;
+        for index in 0..245 {
+            sqlx::query("INSERT INTO native_sessions(id,tool_family,surface,profile) VALUES(?,?,'cli','default')")
+                .bind(format!("session-{index}"))
+                .bind(if index < 205 { "grok" } else { "opencode" })
+                .execute(state.storage.pool()).await.unwrap();
+        }
+        let app = router(state);
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/native-session-tools")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(request("/api/v1/native-session-tools"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json(response).await,
+            serde_json::json!([
+                {"tool_family":"grok","session_count":205},
+                {"tool_family":"opencode","session_count":40}
+            ])
+        );
     }
 
     #[tokio::test]
