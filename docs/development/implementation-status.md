@@ -948,3 +948,20 @@ excluded. Whether the pane draws correctly in a live terminal and finds the MCP
 server under its assumed name was not observed by the coding session; the footer
 shows the error when it does not. Dedicated search is not implemented: search is
 available through `/sessionmesh:continue <words>`, the Web UI and REST.
+
+### Pane search field
+
+The user asked for a search field in the pane. It uses the read-only
+`sessionmesh_search` and `sessionmesh_get_session` tools. Reading the storage
+code showed two properties of the existing search that the field handles: the
+text goes unfiltered to SQLite FTS5 `MATCH`, where characters such as `-`, `:`
+and `"` are syntax and fail the query, so the pane quotes every word; and matches
+are returned oldest first, so the pane reads at most four pages of 100 matches and
+reports in the footer when more exist. Neither was changed in the service.
+Ordering newest first and escaping inside the service would change the shared
+search for the Web UI and REST and remains an open decision.
+
+Two `claude plugin test` cases pass (quoting and grouping by session; a failing
+search is shown instead of an empty list), the plugin validates, and the
+repository contract test pins the pane to the three read-only tools. The live
+render in a terminal was not observed by the coding session.

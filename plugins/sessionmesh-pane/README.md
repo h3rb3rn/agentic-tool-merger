@@ -2,7 +2,8 @@
 
 A pane beside the chat that lists the newest SessionMesh sessions of every
 imported coding agent (Codex, Claude Code, OpenCode, Grok Build, Agy, Continue).
-Filter buttons narrow the list to one tool. Pressing a session puts
+Filter buttons narrow the list to one tool, and the search field finds sessions
+by the words in their conversation. Pressing a session puts
 `/sessionmesh:continue <id>` into the prompt box without sending it, so you stay
 in control of what is loaded.
 

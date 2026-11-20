@@ -20,8 +20,9 @@ changes to SessionMesh are recorded here.
   includes them.
 - Exported `sessionmesh_handoff::redact` as the shared redaction boundary.
 - Added the `sessionmesh-pane` plugin, a Claude Code pane beside the chat that
-  lists the newest sessions, filters by tool, and prepares
-  `/sessionmesh:continue <id>` in the prompt box without sending it. Documented
+  lists the newest sessions, filters by tool, searches all sessions with a search
+  field (words are quoted as full-text phrases; matches are grouped by session),
+  and prepares `/sessionmesh:continue <id>` in the prompt box without sending it. Documented
   the available ways to search sessions.
 
 ### Handoff correctness

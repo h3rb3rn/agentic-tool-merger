@@ -52,7 +52,10 @@ also reads the compact handoff.
 
 ## Searching sessions
 
-There is no dedicated search command yet. Three routes exist:
+Four routes exist:
+
+- **In the pane:** the search field of the [pane](#pane-beside-the-chat) searches
+  all sessions and lists the matching ones with their hit counts.
 
 - **In Claude Code:** `/sessionmesh:continue <words>` runs `sessionmesh_search`
   with the words, then offers the matching sessions to choose from. The search
@@ -72,10 +75,17 @@ words. `sessionmesh_list_sessions` only filters by tool and cannot search titles
 The `sessionmesh-pane` plugin (`plugins/sessionmesh-pane`) is a Claude Code mod
 that keeps the newest sessions visible in a pane beside the conversation. Filter
 buttons narrow the list to one tool, and pressing a session puts
-`/sessionmesh:continue <id>` into the prompt box without sending it. It refreshes
+`/sessionmesh:continue <id>` into the prompt box without sending it. The search
+field above the list sends the typed words to `sessionmesh_search`, quotes every
+word so that characters such as `-` or `:` are not read as full-text syntax,
+groups the matching events by session, and names the ten sessions with the most
+hits. The search tool returns the oldest matches first, so the pane reads at
+most four pages of 100 matches and says in its footer when more exist; narrow
+the words in that case. It refreshes
 at session start, after each turn, and on demand, and `/sessionmesh-pane`
-reopens it. It reads only `sessionmesh_list_sessions` through the `sessionmesh`
-plugin's MCP server and shows load errors in its footer.
+reopens it. It reads only `sessionmesh_list_sessions`, `sessionmesh_search` and
+`sessionmesh_get_session` through the `sessionmesh` plugin's MCP server and shows
+load and search errors in its footer.
 
 ```text
 /plugin install sessionmesh-pane@sessionmesh
