@@ -916,3 +916,21 @@ did not act on an instruction contained in the history, and asked for
 confirmation before any change. No files were modified by the test. Only a
 headless run was exercised; an interactive session with a handoff from a session
 in the same workspace was not.
+
+### Publication of the plugin and handoff fix
+
+The user approved committing and pushing on a feature branch. The source
+checkout's index still pointed at an older commit and its working tree mixed
+several already-published branches, so a clean worktree was created from
+`582008a` (the tip of the unmerged FAQ branch, itself based on current `main`
+`32bcb95`), only the files changed for this work were copied in, and a recursive
+comparison confirmed no other difference besides build artifacts. The sensitive
+data scan of the diff found nothing.
+
+Branch `feat/claude-code-plugin-and-handoff-observations` holds two commits: the
+handoff observation fix (ADR-012) and the plugin with its MCP tools. It is
+stacked on the unmerged `feat/grok-build-import`, `fix/all-tools-navigation` and
+`feat/web-faq-session-handoffs` work, so a pull request must either target the
+FAQ branch or wait until those are merged into `main`. No pull request was opened
+and `main` was not touched. GitHub reports existing dependency advisories on the
+default branch, which remain the open maintenance task recorded earlier.
