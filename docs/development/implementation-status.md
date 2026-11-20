@@ -621,5 +621,22 @@ request concurrency/cancellation and visible content-error recovery. The GUI
 now preserves API cursor boundaries, exposes previous/next event pages, keeps
 live pages at most 200 cards and maintains one stream per selected page/filter.
 Payload requests use four slots with cancellation and explicit retry controls.
-Raw disclosure continues to require user action. Deployment and final browser
-verification are recorded below when complete.
+Raw disclosure continues to require user action.
+
+Validation: all 17 web tests and twelve repository/schema/security tests pass,
+alongside formatting, ESLint, TypeScript, the production web build and strict
+MkDocs. Rust behavior is unchanged; the OCI release compilation succeeds.
+The first test run failed all four newly added behavioral regressions before
+the implementation was changed; a fifth test additionally bounds a live tail.
+
+The rebuilt image
+`sha256:fd27328e5754cf0c43be2033a9431f290c2a504d95ae8a4580faa919b8f6fe93`
+is deployed and healthy. A production headless Chromium check authenticated
+without printing credentials or session text, loaded all 200 content blocks,
+verified prompts/replies are visible, navigated to the next page and back, and
+measured a peak of four simultaneous detail requests. JavaScript errors and
+failed detail requests were both zero. MCP negotiation, its five tools and the
+workspace handoff check also pass. The existing state volume is preserved.
+The changes are published on `fix/gui-timeline-loading` without merging main.
+SessionMesh decision recording was attempted but the connected MCP process
+refused writes; this repository ledger preserves the confirmed result.
