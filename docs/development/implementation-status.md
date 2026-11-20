@@ -640,3 +640,21 @@ workspace handoff check also pass. The existing state volume is preserved.
 The changes are published on `fix/gui-timeline-loading` without merging main.
 SessionMesh decision recording was attempted but the connected MCP process
 refused writes; this repository ledger preserves the confirmed result.
+
+## GUI authentication recovery — 2026-11-20
+
+The user reported `Sessions are temporarily unavailable` after deployment.
+The running container is healthy. A current-token probe returns HTTP 200 with
+200 session summaries; an invalid token returns HTTP 401 `unauthorized`.
+The browser previously discarded HTTP status and rendered the same generic
+message for invalid credentials and server/network outages. This reproduces
+the reported message but does not establish which token the user's tab holds.
+
+Two focused tests failed before implementation: HTTP status/callback behavior
+and replacing a rejected saved token in the full application. The UI now clears
+the rejected token and query cache, explains the authentication failure, shows
+the current-token retrieval command and permits reconnection. A token-specific
+guard ignores late failures from an older client. Non-401 failures preserve the
+token. An additional test covers stream rejection without an authentication
+retry loop. The exposed SessionMesh MCP transport was closed at session start;
+verified state and changes are persisted in this ledger.

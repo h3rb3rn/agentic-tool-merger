@@ -5,6 +5,13 @@ changes to SessionMesh are recorded here.
 
 ## Unreleased
 
+### Web authentication
+
+- Recover from rejected saved API tokens with an explicit login message, cleared
+  authenticated cache and a replacement-token form. Show the token retrieval
+  command and a manual **Change API token** control. Preserve HTTP status in
+  request errors and stop stream reconnection on HTTP 401.
+
 ### Web timeline
 
 - Keep historical event pages bounded during SSE replay and expose previous/next

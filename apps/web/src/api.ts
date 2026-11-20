@@ -107,11 +107,25 @@ interface ErrorEnvelope {
   message?: string;
 }
 
+/** Preserves HTTP status so authentication failures are distinguishable from outages. */
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 /**
  * Creates the authenticated browser client. Streaming uses fetch instead of
  * EventSource because native EventSource cannot send the local bearer token.
  */
-export function createApiClient(token: string): SessionMeshClient {
+export function createApiClient(
+  token: string,
+  onUnauthorized?: () => void,
+): SessionMeshClient {
   const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
     const response = await fetch(path, {
       ...init,
@@ -122,7 +136,11 @@ export function createApiClient(token: string): SessionMeshClient {
     });
     if (!response.ok) {
       const error = (await response.json().catch(() => ({}))) as ErrorEnvelope;
-      throw new Error(error.message ?? `Request failed (${response.status})`);
+      if (response.status === 401) onUnauthorized?.();
+      throw new ApiError(
+        response.status,
+        error.message ?? `Request failed (${response.status})`,
+      );
     }
     return (await response.json()) as T;
   };
@@ -218,6 +236,7 @@ export function createApiClient(token: string): SessionMeshClient {
         controller.signal,
         onEvent,
         onConnectionChange,
+        onUnauthorized,
       );
       return () => controller.abort();
     },
@@ -230,6 +249,7 @@ async function consumeEventStream(
   signal: AbortSignal,
   onEvent: (event: EventSummary) => void,
   onConnectionChange?: (connected: boolean) => void,
+  onUnauthorized?: () => void,
 ): Promise<void> {
   let resumeId = lastEventId;
   let retryDelay = 500;
@@ -244,6 +264,10 @@ async function consumeEventStream(
         headers,
         signal,
       });
+      if (response.status === 401) {
+        onUnauthorized?.();
+        return;
+      }
       if (!response.ok || !response.body) throw new Error("stream unavailable");
       onConnectionChange?.(true);
       retryDelay = 500;

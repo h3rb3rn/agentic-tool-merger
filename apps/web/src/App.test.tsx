@@ -5,7 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { CanonicalEvent, EventSummary, SessionMeshClient } from "./api";
@@ -524,5 +524,43 @@ describe("bounded timeline pages", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("Recovered message")).toBeInTheDocument();
+  });
+});
+
+describe("saved API token recovery", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("clears a rejected token and reconnects with a replacement token", async () => {
+    sessionStorage.setItem("api-token", "old-token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((path, init) => {
+        const valid = init.headers.Authorization === "Bearer replacement-token";
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(
+              valid
+                ? path.includes("native-sessions")
+                  ? { items: [], next_cursor: null }
+                  : []
+                : { code: "unauthorized" },
+            ),
+            { status: valid ? 200 : 401 },
+          ),
+        );
+      }),
+    );
+    render(<App />);
+    expect(await screen.findByLabelText("Local API token")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("API token is invalid");
+    expect(sessionStorage.getItem("api-token")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Local API token"), {
+      target: { value: "replacement-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(
+      await screen.findByText("No native sessions found"),
+    ).toBeInTheDocument();
+    expect(sessionStorage.getItem("api-token")).toBe("replacement-token");
   });
 });

@@ -183,6 +183,13 @@ docker exec agenttool-merger-sessionmesh-1 \
 Paste the value into **Local API token**. The browser stores it only in the
 current tab's `sessionStorage`.
 
+If a saved token is rejected (HTTP 401), the UI removes it, clears authenticated
+query data and returns to the token form with an explicit message. Copy the
+current token using the command above and reconnect. **Change API token** also
+returns to this form. Other HTTP failures retain the token and display the
+status code beside the session-loading error; network failures show connection
+advice. Tokens are never included in URLs or displayed by the application.
+
 !!! warning
 
     Treat the API token like a password. Do not commit it, place it in `.env`,
