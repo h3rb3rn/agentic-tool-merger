@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -200,7 +206,10 @@ describe("Session timeline", () => {
     expect(
       (await screen.findAllByText(/synthetic-secret/)).length,
     ).toBeGreaterThan(0);
-    expect(api.getEvent).toHaveBeenCalledWith("event-1");
+    expect(api.getEvent).toHaveBeenCalledWith(
+      "event-1",
+      expect.any(AbortSignal),
+    );
   });
 
   it("loads human-readable content for the complete visible timeline", async () => {
@@ -233,8 +242,14 @@ describe("Session timeline", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText("98 tests passed")).toBeInTheDocument();
     expect(screen.getAllByText("/native/rollout.jsonl")).toHaveLength(2);
-    expect(api.getEvent).toHaveBeenCalledWith("event-1");
-    expect(api.getEvent).toHaveBeenCalledWith("event-2");
+    expect(api.getEvent).toHaveBeenCalledWith(
+      "event-1",
+      expect.any(AbortSignal),
+    );
+    expect(api.getEvent).toHaveBeenCalledWith(
+      "event-2",
+      expect.any(AbortSignal),
+    );
   });
 
   it("finds keyword content across sessions and identifies each agent tool", async () => {
@@ -426,5 +441,88 @@ describe("live event reconciliation", () => {
     await waitFor(() =>
       expect(screen.getByText("Tool Result")).toBeInTheDocument(),
     );
+  });
+});
+
+describe("bounded timeline pages", () => {
+  it("keeps replay outside the visible page and navigates using the API cursor", async () => {
+    let publish: ((event: EventSummary) => void) | undefined;
+    const api = client({
+      listEvents: vi.fn().mockImplementation((_sessionId, _kind, cursor) =>
+        Promise.resolve({
+          items: [cursor ? events[1] : events[0]],
+          next_cursor: cursor ? null : "next-page",
+        }),
+      ),
+      subscribe: vi.fn((_lastId, onEvent) => {
+        publish = onEvent;
+        return () => undefined;
+      }),
+    });
+    render(<App client={api} />);
+    await screen.findByText("Tool Call");
+    act(() => {
+      for (let index = 0; index < 500; index++)
+        publish?.({ ...events[1], event_id: `replay-${index}` });
+    });
+    expect(screen.queryByText("Tool Result")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next events" }));
+    expect(await screen.findByText("Tool Result")).toBeInTheDocument();
+    expect(api.listEvents).toHaveBeenLastCalledWith(
+      "session/alpha",
+      undefined,
+      "next-page",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Previous events" }));
+    expect(await screen.findByText("Tool Call")).toBeInTheDocument();
+  });
+
+  it("bounds a live tail and keeps one subscription while replay arrives", async () => {
+    let publish: ((event: EventSummary) => void) | undefined;
+    const api = client({
+      listEvents: vi
+        .fn()
+        .mockResolvedValue({ items: [events[0]], next_cursor: null }),
+      subscribe: vi.fn((_lastId, onEvent) => {
+        publish = onEvent;
+        return () => undefined;
+      }),
+    });
+    const { container } = render(<App client={api} />);
+    await screen.findByText("Tool Call");
+    act(() => {
+      for (let index = 0; index < 500; index++)
+        publish?.({ ...events[1], event_id: `tail-${index}` });
+    });
+    expect(container.querySelectorAll("article.event")).toHaveLength(200);
+    expect(api.subscribe).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("button", { name: "Refresh timeline for new events" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a recoverable error when individual content fails to load", async () => {
+    const api = client({
+      getEvent: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("offline"))
+        .mockResolvedValue({
+          ...events[0],
+          schema_version: "1.0",
+          payload: { text: "Recovered message" },
+          provenance: {},
+        }),
+    });
+    render(<App client={api} />);
+    await screen.findByText("Tool Call");
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Reveal event data" })[0],
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Reveal now" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Event content could not be loaded",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Recovered message")).toBeInTheDocument();
   });
 });

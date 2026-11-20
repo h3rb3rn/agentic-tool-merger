@@ -605,3 +605,21 @@ multi-day resource stability.
 The deployed source passes all 158 Rust tests/doc tests, strict Clippy, the full
 npm check pipeline, formatting and strict MkDocs in the publication checkout.
 The feature branch is published separately from `main`; no merge is performed.
+
+## GUI content loading — 2026-11-20
+
+The user reported missing GUI content. Authenticated production API probes
+return sessions, events and canonical details successfully. A real headless
+Chromium run reproduced 1,466 timeline cards despite the API page size of 200.
+SSE replay expanded the selected page, and the subscription restarted whenever
+its data changed. Revealing all content then launched hundreds of parallel
+detail requests and reproduced browser `Failed to fetch` errors. Default
+metadata-only display also lacked an explanation of how to reveal messages.
+
+Focused regressions failed before the fix for bounded replay/pagination,
+request concurrency/cancellation and visible content-error recovery. The GUI
+now preserves API cursor boundaries, exposes previous/next event pages, keeps
+live pages at most 200 cards and maintains one stream per selected page/filter.
+Payload requests use four slots with cancellation and explicit retry controls.
+Raw disclosure continues to require user action. Deployment and final browser
+verification are recorded below when complete.

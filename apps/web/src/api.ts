@@ -77,8 +77,12 @@ export interface GlobalSessionDetail {
 
 export interface SessionMeshClient {
   listSessions(): Promise<Page<NativeSession>>;
-  listEvents(sessionId: string, kind?: string): Promise<Page<EventSummary>>;
-  getEvent(eventId: string): Promise<CanonicalEvent>;
+  listEvents(
+    sessionId: string,
+    kind?: string,
+    cursor?: string,
+  ): Promise<Page<EventSummary>>;
+  getEvent(eventId: string, signal?: AbortSignal): Promise<CanonicalEvent>;
   searchEvents(query: string): Promise<SearchResult[]>;
   listCorrelationCandidates(): Promise<CorrelationCandidate[]>;
   reviewCorrelationCandidate(
@@ -123,18 +127,47 @@ export function createApiClient(token: string): SessionMeshClient {
     return (await response.json()) as T;
   };
 
+  // Bound payload fetches independently of the number of rendered metadata cards.
+  let activeDetails = 0;
+  const detailQueue: Array<() => void> = [];
+  const getEvent = (
+    eventId: string,
+    signal?: AbortSignal,
+  ): Promise<CanonicalEvent> =>
+    new Promise((resolve, reject) => {
+      const start = () => {
+        if (signal?.aborted) {
+          reject(new DOMException("Content request cancelled", "AbortError"));
+          detailQueue.shift()?.();
+          return;
+        }
+        activeDetails++;
+        void request<CanonicalEvent>(
+          `/api/v1/events/${encodeURIComponent(eventId)}`,
+          { signal },
+        )
+          .then(resolve, reject)
+          .finally(() => {
+            activeDetails--;
+            detailQueue.shift()?.();
+          });
+      };
+      if (activeDetails < 4) start();
+      else detailQueue.push(start);
+    });
+
   return {
     listSessions: () => request("/api/v1/native-sessions?limit=200"),
-    listEvents: (sessionId, kind) => {
+    listEvents: (sessionId, kind, cursor) => {
       const query = new URLSearchParams({
         native_session_id: sessionId,
         limit: "200",
       });
       if (kind) query.set("kind", kind);
+      if (cursor) query.set("cursor", cursor);
       return request(`/api/v1/events?${query.toString()}`);
     },
-    getEvent: (eventId) =>
-      request(`/api/v1/events/${encodeURIComponent(eventId)}`),
+    getEvent,
     searchEvents: (query) =>
       request(
         `/api/v1/events/search?${new URLSearchParams({ query, limit: "100" }).toString()}`,

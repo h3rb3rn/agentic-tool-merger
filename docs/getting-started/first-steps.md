@@ -188,6 +188,19 @@ current tab's `sessionStorage`.
     Treat the API token like a password. Do not commit it, place it in `.env`,
     publish it in documentation, or send it in chat.
 
+### Read session messages in the Web UI
+
+Select a native session, then choose **Show timeline content** and confirm
+**Show content now** to load prompts and AI replies. By default the timeline
+shows metadata; message text and source paths require explicit disclosure.
+
+Use **Next events** and **Previous events** to navigate chronological pages of
+up to 200 events. Live replay preserves a historical page's boundary instead
+of expanding it with the rest of the archive. A full live page offers
+**Refresh timeline for new events** when more activity arrives. Content loads
+through at most four concurrent detail requests. Individual failures show a
+visible error and **Retry**; changing pages cancels obsolete requests.
+
 ## Normal daily use
 
 Always start an agent from the project directory:

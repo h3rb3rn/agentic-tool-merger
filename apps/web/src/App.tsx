@@ -11,6 +11,7 @@ import {
   type CanonicalEvent,
   type EventSummary,
   type NativeSession,
+  type Page,
   type SessionMeshClient,
   createApiClient,
 } from "./api";
@@ -150,6 +151,11 @@ function Timeline({ client }: { client: SessionMeshClient }) {
     () => new URLSearchParams(window.location.search).get("session") ?? "",
   );
   const [kind, setKind] = useState("");
+  const [eventPages, setEventPages] = useState<{
+    scope: string;
+    cursors: Array<string | undefined>;
+  }>({ scope: "", cursors: [undefined] });
+  const [hasNewEvents, setHasNewEvents] = useState(false);
   const [searchText, setSearchText] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [showContent, setShowContent] = useState(false);
@@ -183,9 +189,15 @@ function Timeline({ client }: { client: SessionMeshClient }) {
     () => sessionTree(visibleSessions, sessionSort, sessionGroup),
     [sessionGroup, sessionSort, visibleSessions],
   );
+  const eventScope = JSON.stringify([effectiveId, kind]);
+  const pageCursors =
+    eventPages.scope === eventScope ? eventPages.cursors : [undefined];
+  const eventCursor = pageCursors.at(-1);
+  const eventQueryKey = ["events", effectiveId, kind, eventCursor];
   const events = useQuery({
-    queryKey: ["events", effectiveId, kind],
-    queryFn: () => client.listEvents(effectiveId, kind || undefined),
+    queryKey: eventQueryKey,
+    queryFn: () =>
+      client.listEvents(effectiveId, kind || undefined, eventCursor),
     enabled: Boolean(effectiveId),
   });
   const search = useQuery({
@@ -201,28 +213,39 @@ function Timeline({ client }: { client: SessionMeshClient }) {
     window.history.replaceState(null, "", url);
   }, [effectiveId]);
 
+  const eventsReady = events.isSuccess;
   useEffect(() => {
-    if (!effectiveId) return;
-    const lastId = events.data?.items.at(-1)?.event_id;
+    if (!effectiveId || !eventsReady) return;
+    const key = ["events", effectiveId, kind, eventCursor];
+    const page = cache.getQueryData<Page<EventSummary>>(key);
+    const lastId = page?.items.at(-1)?.event_id;
+    setHasNewEvents(false);
     return client.subscribe(
       lastId,
       (incoming) => {
-        if (incoming.native_session_id !== effectiveId) return;
-        cache.setQueryData(
-          ["events", effectiveId, kind],
-          (
-            page:
-              | { items: EventSummary[]; next_cursor: string | null }
-              | undefined,
-          ) => ({
-            items: mergeChronologicalEvents(page?.items ?? [], [incoming]),
-            next_cursor: page?.next_cursor ?? null,
-          }),
-        );
+        if (
+          incoming.native_session_id !== effectiveId ||
+          (kind && incoming.kind !== kind)
+        )
+          return;
+        const current = cache.getQueryData<Page<EventSummary>>(key);
+        // Historical pages retain their API cursor boundary; replay cannot expand them.
+        if (!current || current.next_cursor) return;
+        if (
+          current.items.length >= 200 &&
+          !current.items.some((item) => item.event_id === incoming.event_id)
+        ) {
+          setHasNewEvents(true);
+          return;
+        }
+        cache.setQueryData(key, {
+          ...current,
+          items: mergeChronologicalEvents(current.items, [incoming]),
+        });
       },
       setConnected,
     );
-  }, [cache, client, effectiveId, events.data?.items, kind]);
+  }, [cache, client, effectiveId, kind, eventCursor, eventsReady]);
 
   return (
     <main className="app-shell">
@@ -485,6 +508,49 @@ function Timeline({ client }: { client: SessionMeshClient }) {
             />
           )}
           {events.data?.items.length === 0 && <p>No matching events</p>}
+          {!showContent && events.data && events.data.items.length > 0 && (
+            <p>
+              Message text is hidden. Select “Show timeline content” to read
+              prompts and AI replies.
+            </p>
+          )}
+          <nav aria-label="Timeline pages">
+            <button
+              type="button"
+              disabled={pageCursors.length <= 1 || events.isPending}
+              onClick={() =>
+                setEventPages({
+                  scope: eventScope,
+                  cursors: pageCursors.slice(0, -1),
+                })
+              }
+            >
+              Previous events
+            </button>
+            <button
+              type="button"
+              disabled={!events.data?.next_cursor || events.isPending}
+              onClick={() =>
+                setEventPages({
+                  scope: eventScope,
+                  cursors: [...pageCursors, events.data!.next_cursor!],
+                })
+              }
+            >
+              Next events
+            </button>
+            {hasNewEvents && (
+              <button
+                type="button"
+                onClick={() => {
+                  setHasNewEvents(false);
+                  void events.refetch();
+                }}
+              >
+                Refresh timeline for new events
+              </button>
+            )}
+          </nav>
           <ol className="timeline">
             {groupEvents(events.data?.items ?? []).map((group) => (
               <li
@@ -851,20 +917,32 @@ function EventCard({
 }) {
   const [confirming, setConfirming] = useState(false);
   const [detail, setDetail] = useState<CanonicalEvent>();
-  const reveal = async () => {
-    setDetail(await client.getEvent(event.event_id));
-    setConfirming(false);
-  };
+  const [requested, setRequested] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [loadError, setLoadError] = useState(false);
+  const [loading, setLoading] = useState(false);
   useEffect(() => {
-    if (!revealContent || detail) return;
-    let active = true;
-    void client.getEvent(event.event_id).then((loaded) => {
-      if (active) setDetail(loaded);
-    });
-    return () => {
-      active = false;
-    };
-  }, [client, detail, event.event_id, revealContent]);
+    if (!(revealContent || requested) || detail) return;
+    const controller = new AbortController();
+    setLoading(true);
+    setLoadError(false);
+    void client.getEvent(event.event_id, controller.signal).then(
+      (loaded) => {
+        if (!controller.signal.aborted) {
+          setDetail(loaded);
+          setConfirming(false);
+          setLoading(false);
+        }
+      },
+      () => {
+        if (!controller.signal.aborted) {
+          setLoadError(true);
+          setLoading(false);
+        }
+      },
+    );
+    return () => controller.abort();
+  }, [client, detail, event.event_id, revealContent, requested, loadAttempt]);
   return (
     <article className={`event event-${event.kind || "unknown"}`}>
       <div className="event-title">
@@ -895,13 +973,26 @@ function EventCard({
           <p>
             Native event data may contain secrets, prompts, or file contents.
           </p>
-          <button type="button" onClick={() => void reveal()}>
+          <button
+            type="button"
+            onClick={() => {
+              setRequested(true);
+              setConfirming(false);
+            }}
+          >
             Reveal now
           </button>
           <button type="button" onClick={() => setConfirming(false)}>
             Cancel
           </button>
         </div>
+      )}
+      {loading && <p role="status">Loading event content…</p>}
+      {loadError && (
+        <ErrorState
+          message="Event content could not be loaded"
+          retry={() => setLoadAttempt((attempt) => attempt + 1)}
+        />
       )}
       {detail && <EventContent detail={detail} />}
     </article>

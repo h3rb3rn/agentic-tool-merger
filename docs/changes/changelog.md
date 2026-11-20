@@ -5,6 +5,15 @@ changes to SessionMesh are recorded here.
 
 ## Unreleased
 
+### Web timeline
+
+- Keep historical event pages bounded during SSE replay and expose previous/next
+  navigation. Live updates preserve the selected event-kind filter and no longer
+  restart the stream after every incoming event.
+- Limit event-content loading to four concurrent requests, cancel obsolete
+  requests and show recoverable errors. Explain how to reveal prompt/reply text
+  when only metadata is visible.
+
 ### Resource management
 
 - Bounded derived handoff prose with explicit UTF-8-safe excerpts, fixing default
