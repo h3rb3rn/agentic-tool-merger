@@ -750,3 +750,19 @@ The inventory refreshes every 30 seconds. Payload paging and four-request detail
 limits remain in effect. No session data is removed or re-imported for this fix.
 The exposed MCP transport was closed at the session-start handoff attempt;
 confirmed state and changes are recorded here.
+
+Final validation: all 164 Rust workspace tests/doc tests, formatting and strict
+Clippy pass. All 24 web tests, twelve repository/schema/security tests, lint,
+TypeScript, production build and strict MkDocs pass. The deployed image is
+`sha256:6a7f37fde83b06885253bbdf1548c5796fbaf80c182b4a349e3c6e4ea1c4cf30`.
+The container is healthy and its existing state volume is preserved.
+
+The real Chromium check found all six imported agents (Agy, Claude Code, Codex,
+Continue, Grok and OpenCode) in the selector without paging. All entries fit
+inside both the desktop and mobile viewport above the session list. Selecting
+OpenCode displayed its 40 sessions and loaded conversation contents; switching
+to Grok retained all agent entries, with 152 Grok sessions available. Every
+session-page request was scoped to an agent. There were no speculative event
+payload requests before disclosure and zero JavaScript errors. Health and a
+fresh MCP five-tool/workspace-handoff check pass. The change is published on
+`fix/all-tools-navigation` without modifying main.
