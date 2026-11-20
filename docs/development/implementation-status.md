@@ -934,3 +934,17 @@ stacked on the unmerged `feat/grok-build-import`, `fix/all-tools-navigation` and
 FAQ branch or wait until those are merged into `main`. No pull request was opened
 and `main` was not touched. GitHub reports existing dependency advisories on the
 default branch, which remain the open maintenance task recorded earlier.
+
+### Pane plugin
+
+The user asked to show the plugin on the right side and then to add the mod to
+the repository. A pane mod (`plugins/sessionmesh-pane`) lists sessions through
+`sessionmesh_list_sessions`, offers tool filters and prepares the continue
+command without sending it. It passes `claude plugin validate`; the first
+validation failed because a helper that receives the engine interface `$` must be
+declared at file level, which was corrected. A contract test checks that the pane
+calls only the list tool and never submits prompts. Engine-generated typings are
+excluded. Whether the pane draws correctly in a live terminal and finds the MCP
+server under its assumed name was not observed by the coding session; the footer
+shows the error when it does not. Dedicated search is not implemented: search is
+available through `/sessionmesh:continue <words>`, the Web UI and REST.

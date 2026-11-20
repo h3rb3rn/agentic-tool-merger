@@ -1,11 +1,18 @@
 {
   "name": "sessionmesh",
-  "owner": { "name": "SessionMesh contributors" },
+  "owner": {
+    "name": "SessionMesh contributors"
+  },
   "plugins": [
     {
       "name": "sessionmesh",
       "source": "./plugins/sessionmesh",
       "description": "Continue sessions of other coding agents in Claude Code through SessionMesh."
+    },
+    {
+      "name": "sessionmesh-pane",
+      "source": "./plugins/sessionmesh-pane",
+      "description": "A pane beside the chat that lists SessionMesh sessions and prepares /sessionmesh:continue."
     }
   ]
 }

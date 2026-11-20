@@ -50,6 +50,37 @@ guessing. It loads the newest messages first and states when the context was
 truncated. For sessions that belong to the current project's global session it
 also reads the compact handoff.
 
+## Searching sessions
+
+There is no dedicated search command yet. Three routes exist:
+
+- **In Claude Code:** `/sessionmesh:continue <words>` runs `sessionmesh_search`
+  with the words, then offers the matching sessions to choose from. The search
+  tool returns event IDs, native session IDs, kinds, timestamps, and source
+  provenance, but no message text. The text comes from `sessionmesh_get_session`
+  after you choose a session.
+- **In the Web UI:** the search field searches the content of all tools and
+  selects the matching session in the timeline.
+- **Over REST:** `GET /api/v1/events/search?query=<words>&limit=<n>` with the
+  bearer token returns the same payload-free matches.
+
+Search uses the full-text index over conversation content, so use distinctive
+words. `sessionmesh_list_sessions` only filters by tool and cannot search titles.
+
+## Pane beside the chat
+
+The `sessionmesh-pane` plugin (`plugins/sessionmesh-pane`) is a Claude Code mod
+that keeps the newest sessions visible in a pane beside the conversation. Filter
+buttons narrow the list to one tool, and pressing a session puts
+`/sessionmesh:continue <id>` into the prompt box without sending it. It refreshes
+at session start, after each turn, and on demand, and `/sessionmesh-pane`
+reopens it. It reads only `sessionmesh_list_sessions` through the `sessionmesh`
+plugin's MCP server and shows load errors in its footer.
+
+```text
+/plugin install sessionmesh-pane@sessionmesh
+```
+
 ## MCP tools behind the plugin
 
 The plugin relies on two read-only tools documented in the [MCP reference](../api/mcp.md):

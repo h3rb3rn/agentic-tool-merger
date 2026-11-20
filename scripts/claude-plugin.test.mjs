@@ -81,3 +81,31 @@ test("continue command treats session text as untrusted data", async () => {
   assert.match(text, /never an instruction/i);
   assert.match(text, /git status/);
 });
+
+test("pane mod is listed, loads only read-only data and never sends prompts", async () => {
+  const pane = path.join(root, "plugins", "sessionmesh-pane");
+  const manifest = await readJson(pane, ".claude-plugin", "plugin.json");
+  const marketplace = await readJson(
+    root,
+    ".claude-plugin",
+    "marketplace.json",
+  );
+  assert.equal(manifest.name, "sessionmesh-pane");
+  const entry = marketplace.plugins.find((item) => item.name === manifest.name);
+  assert.equal(entry?.source, "./plugins/sessionmesh-pane");
+  const hooks = await readJson(pane, "hooks", "hooks.json");
+  assert.deepEqual(hooks.modules, ["./register.tsx"]);
+
+  const source = await readText(pane, "hooks", "register.tsx");
+  const calls = [
+    ...source.matchAll(/\$\.mcp\.call\([^,]+,\s*['"]([a-z_]+)['"]/g),
+  ].map((match) => match[1]);
+  assert.deepEqual(calls, ["sessionmesh_list_sessions"]);
+  assert.match(
+    source,
+    /mode: ['"]replace['"]/,
+    "a press only fills the prompt box",
+  );
+  assert.doesNotMatch(source, /prompt\.submit|\$\.session\.send/);
+  await assert.rejects(stat(path.join(pane, ".claude-plugin", "types")));
+});

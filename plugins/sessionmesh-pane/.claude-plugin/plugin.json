@@ -1,0 +1,7 @@
+{
+  "name": "sessionmesh-pane",
+  "version": "0.1.0",
+  "description": "A pane beside the chat that lists SessionMesh sessions of all imported coding agents and prepares /sessionmesh:continue for the one you pick.",
+  "license": "Apache-2.0",
+  "types": "./types/index.d.ts"
+}
