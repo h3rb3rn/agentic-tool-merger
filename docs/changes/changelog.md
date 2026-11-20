@@ -5,6 +5,33 @@ changes to SessionMesh are recorded here.
 
 ## Unreleased
 
+### Claude Code plugin
+
+- Added the `sessionmesh` Claude Code plugin (`plugins/sessionmesh`, marketplace
+  manifest in `.claude-plugin/`) with `/sessionmesh:sessions` and
+  `/sessionmesh:continue` to continue a session created by Codex, OpenCode, Agy,
+  Grok Build, Continue, or another Claude Code session. It bundles the MCP bridge
+  and uses read-only tools only.
+- Added the read-only MCP tools `sessionmesh_list_sessions` (metadata, newest
+  activity first, `tool_family` filter, cursor paging) and
+  `sessionmesh_get_session` (newest redacted, bounded messages of one native
+  session, marked untrusted and ingestion-excluded). The MCP tool count is now
+  seven, so `scripts/check-sessionmesh-mcp` requires a service image that
+  includes them.
+- Exported `sessionmesh_handoff::redact` as the shared redaction boundary.
+
+### Handoff correctness
+
+- Fixed handoffs presenting conversation as work: the latest user message was
+  delivered as an open task and next action, and the latest assistant message as
+  completed work, producing false phase and completion values. `open_tasks` and
+  `completed` now contain only explicit task/plan events and MCP-recorded facts.
+- Handoff schema **1.1** adds optional `latest_user_request` and
+  `latest_assistant_reply` observations with provenance and redaction. Phase is
+  `unknown` without explicit tasks or completed work. Schema 1.0 documents stay
+  valid and readable; existing snapshots are not rewritten and are replaced when
+  a global session is next reconciled. See ADR-012.
+
 ### Web FAQ
 
 - Added a public FAQ page with verified native resume, MCP setup and cross-client

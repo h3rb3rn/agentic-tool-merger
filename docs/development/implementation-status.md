@@ -808,3 +808,129 @@ without another session-page fetch. JavaScript errors were zero. No conversation
 or credentials were printed. Fresh MCP negotiation, five tools and workspace
 handoff delivery pass. Changes are published on `feat/web-faq-session-handoffs`
 without modifying main.
+
+## Handoff observation separation — 2026-11-20
+
+The user reported that a SessionMesh handoff presented their question as an open
+task and a full chat answer as completed work. MCP read tools were verified live
+(`get_current`, `get_handoff`, `search`); write tools were not exercised to avoid
+polluting shared context.
+
+Verified cause: `extract_facts` in `sessionmesh-handoff` promoted the latest user
+message to `open_tasks` and the latest assistant message to `completed` whenever
+no explicit task/plan events existed, and `phase`/`completion`/`next_action` were
+derived from them. The behavior was undocumented and conflicted with the rule
+that observations, decisions, and instructions stay distinct. Simply removing it
+would have made `generate()` fail with `MissingProvenance` for sessions without
+explicit tasks.
+
+The user approved the recommended design (ADR-012): schema 1.1 with optional
+`latest_user_request` / `latest_assistant_reply` observations carrying
+provenance, no message promotion into tasks or completed work, phase `unknown`
+without explicit state, and unchanged readability of 1.0 documents.
+
+Tests were written first and failed to compile/pass before the change. Added
+coverage: messages are never tasks or completed work, observations coexist with
+explicit tasks, redaction, explicit completed tasks, 1.0 round-trip, budget
+pressure ordering, and schema acceptance of 1.0/1.1 plus rejection of invalid
+observations. One new budget test initially failed because of its own scenario
+(the only provenance source cannot be dropped); the scenario was corrected, not
+the invariant.
+
+Validation: all workspace tests except `sessionmesh-mcp` pass (see below), Clippy
+with warnings denied passes for handoff and API, formatting passes, 14 Node
+contract tests pass, and `mkdocs build --strict` succeeds.
+
+Not done: the running container still serves the previous image, so live
+handoffs keep the old behavior until the image is rebuilt and deployed. Stored
+1.0 snapshots are not rewritten; they are replaced at the next reconciliation.
+Nothing was committed (initial-commit gate and branch policy unchanged).
+
+Work in progress (separate from this fix): the Claude Code plugin for continuing
+other tools' sessions requires two read-only MCP tools, `sessionmesh_list_sessions`
+and `sessionmesh_get_session`. Their tests are already in
+`crates/sessionmesh-mcp/src/lib.rs` and fail until implemented, so the MCP crate
+is intentionally red at this point.
+
+## Claude Code plugin — 2026-11-20
+
+The user asked for a Claude Code plugin that loads SessionMesh sessions into a
+new session to continue work started in other agentic tools. The existing MCP
+server only exposed the current workspace's global session and metadata-only
+search, so it could neither choose a session nor read its messages. The plugin
+therefore required two read-only MCP tools (ADR-006: MCP stays the integration
+layer; no REST token handling in the plugin).
+
+Implemented test-first: `Storage::recent_native_sessions` and
+`Storage::recent_conversation`, `sessionmesh_list_sessions` and
+`sessionmesh_get_session` (redacted via the shared handoff boundary, bounded,
+untrusted and ingestion-excluded), the `plugins/sessionmesh` plugin with two
+read-only commands and the bundled bridge, a marketplace manifest, and a Node
+contract test that checks manifest, bridge parity, read-only tool allowlist and
+the untrusted-data instructions. `claude plugin validate` passes.
+
+Validation: Rust tests for storage and MCP pass (including recency ordering,
+filtering, paging, truncation, redaction, unknown-session and invalid-argument
+errors); connector regression suite and plugin contract tests pass.
+
+Not verified: the plugin was not loaded into a live Claude Code session, and the
+running container still serves the previous image without the new tools. The
+live MCP check requires seven tools and will fail against the old image until it
+is rebuilt and deployed. Nothing was committed.
+
+### Plugin deployment and ordering correction
+
+The user approved a rebuild. The image was rebuilt with Compose and the
+container recreated; health is `ok` and the named state volume was kept. A live
+probe with a fresh bridge showed seven tools, working `list_sessions` and
+`get_session`, and a schema 1.1 handoff with phase `unknown`, no promoted tasks
+and an optional `latest_user_request`. The coding session's stdio connection
+closed on recreation, as expected.
+
+The probe also exposed a defect in this change: `recent_native_sessions` ordered
+by session start/end columns, which OpenCode, Grok, Agy and Continue never set
+(all `NULL`), so only Codex sessions appeared among the newest 50 and the other
+tools were effectively unreachable. The Claude Code family is named
+`claude-code`, not `claude`, which the first command text used. Regression tests
+failed first (a session with `NULL` times and a later event must rank first);
+ordering now uses the newest event timestamp from the per-session chronology
+index and list items carry `last_activity_at`. The commands and documentation
+name the real families. A second rebuild and live recheck follow.
+
+### Plugin installation and live test
+
+The user asked to install and test the plugin. `claude plugin marketplace add`
+registered this checkout as marketplace `sessionmesh` (declared in user settings)
+and `claude plugin install sessionmesh@sessionmesh` installed version 0.1.0 at
+user scope, read from `plugins/sessionmesh`. Remove it with
+`claude plugin uninstall sessionmesh@sessionmesh` and
+`claude plugin marketplace remove sessionmesh`.
+
+Headless sessions (`claude -p`) verified both commands against the deployed
+service. `/sessionmesh:sessions opencode` listed 20 OpenCode sessions newest
+first with `last_activity_at`, event counts and the continuation cursor.
+`/sessionmesh:continue <id>` loaded an OpenCode session of another project,
+reported its truncation, compared it with the real repository state with
+read-only Git commands, noticed that the session belonged to a different project,
+did not act on an instruction contained in the history, and asked for
+confirmation before any change. No files were modified by the test. Only a
+headless run was exercised; an interactive session with a handoff from a session
+in the same workspace was not.
+
+### Publication of the plugin and handoff fix
+
+The user approved committing and pushing on a feature branch. The source
+checkout's index still pointed at an older commit and its working tree mixed
+several already-published branches, so a clean worktree was created from
+`582008a` (the tip of the unmerged FAQ branch, itself based on current `main`
+`32bcb95`), only the files changed for this work were copied in, and a recursive
+comparison confirmed no other difference besides build artifacts. The sensitive
+data scan of the diff found nothing.
+
+Branch `feat/claude-code-plugin-and-handoff-observations` holds two commits: the
+handoff observation fix (ADR-012) and the plugin with its MCP tools. It is
+stacked on the unmerged `feat/grok-build-import`, `fix/all-tools-navigation` and
+`feat/web-faq-session-handoffs` work, so a pull request must either target the
+FAQ branch or wait until those are merged into `main`. No pull request was opened
+and `main` was not touched. GitHub reports existing dependency advisories on the
+default branch, which remain the open maintenance task recorded earlier.

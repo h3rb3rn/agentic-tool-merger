@@ -67,3 +67,22 @@ for (const schemaCase of cases) {
     assert.ok(validate.errors?.length);
   });
 }
+
+test("handoff.schema.json keeps accepting version 1.0 documents", async () => {
+  const schema = await readJson("schemas/handoff.schema.json");
+  const legacy = await readJson("schemas/examples/handoff.v1_0.valid.json");
+  const validate = compileSchema(schema);
+
+  assert.equal(legacy.schema_version, "1.0");
+  assert.equal(validate(legacy), true, JSON.stringify(validate.errors));
+});
+
+test("handoff.schema.json requires non-empty string observations", async () => {
+  const schema = await readJson("schemas/handoff.schema.json");
+  const example = await readJson("schemas/examples/handoff.valid.json");
+  const validate = compileSchema(schema);
+
+  assert.equal(example.schema_version, "1.1");
+  assert.equal(validate({ ...example, latest_user_request: "" }), false);
+  assert.equal(validate({ ...example, latest_assistant_reply: 7 }), false);
+});

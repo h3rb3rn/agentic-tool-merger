@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check stdio negotiation, all five tools, and workspace handoff without logging it."""
+"""Check stdio negotiation, all seven tools, and workspace handoff without logging it."""
 
 import argparse
 import json
@@ -13,6 +13,8 @@ TOOLS = {
     "sessionmesh_get_current",
     "sessionmesh_get_handoff",
     "sessionmesh_search",
+    "sessionmesh_list_sessions",
+    "sessionmesh_get_session",
     "sessionmesh_record_decision",
     "sessionmesh_record_task",
 }
@@ -117,7 +119,7 @@ def main() -> None:
             print(json.dumps(content))
         else:
             print(
-                "MCP connected; five tools available; workspace handoff retrieved (content hidden)."
+                "MCP connected; seven tools available; workspace handoff retrieved (content hidden)."
             )
     finally:
         process.stdin.close()

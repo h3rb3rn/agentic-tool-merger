@@ -128,7 +128,7 @@ From the intended project directory:
 ```
 
 The check negotiates MCP `2025-06-18`, sends the initialized notification,
-validates all five tools, and requests the current handoff. It hides handoff
+validates all seven tools, and requests the current handoff. It hides handoff
 content and fails on a missing transport, protocol failure, missing tools, or
 unavailable context. A failed handoff does not necessarily mean a failed
 connection: the workspace may have no imported and linked global session.

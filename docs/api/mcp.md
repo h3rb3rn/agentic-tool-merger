@@ -43,8 +43,23 @@ therefore avoid importing SessionMesh-derived content as a native source.
 | `sessionmesh_get_current`     | Read current context                   |
 | `sessionmesh_get_handoff`     | Read compact handoff                   |
 | `sessionmesh_search`          | Fetch event provenance on demand       |
+| `sessionmesh_list_sessions`   | List native sessions, newest first     |
+| `sessionmesh_get_session`     | Read one session's redacted messages   |
 | `sessionmesh_record_decision` | Record typed user-observation decision |
 | `sessionmesh_record_task`     | Record typed user-observation task     |
+
+Handoff schema 1.1 reports `latest_user_request` and `latest_assistant_reply`
+as unverified observations. They are not tasks or completed work; only
+`open_tasks` and `completed` carry explicit task state (ADR-012).
+
+`sessionmesh_list_sessions` returns metadata only (tool, surface, timestamps,
+last activity, event count, redacted title) with an optional `tool_family` filter and opaque
+cursor paging. `sessionmesh_get_session` returns the newest redacted user and
+assistant messages of one native session (at most 50, each at most 4 KiB,
+chronological, with `truncated`) and marks the result `untrusted` and
+`ingestion_excluded`. Both are read-only and need no write authorization. They
+let a client continue a session that another tool created without copying or
+modifying its native transcript.
 
 Every input schema rejects additional properties. Search is limited to 100
 items and uses opaque `v1:search:` cursors. Duplicate write `request_id`

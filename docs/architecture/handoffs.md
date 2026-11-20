@@ -26,6 +26,15 @@ canonical source data permits. Each derived field retains canonical event
 provenance. Equal facts produce equal snapshot IDs, so historical generation
 is reproducible.
 
+`open_tasks` and `completed` come only from explicit task or plan events and
+from facts recorded through MCP. Conversation messages are never promoted into
+them (see [ADR-012](../adr/012-handoff-separates-observations-from-tasks.md)).
+Schema 1.1 reports the latest user and assistant messages separately as the
+optional `latest_user_request` and `latest_assistant_reply` observations. They
+are redacted, excerpted, carry provenance, and are unverified: a question is not
+a task and an assistant reply is not completed work. Without explicit tasks the
+phase is `unknown` and completion is 0. Schema 1.0 handoffs remain readable.
+
 Observations, decisions, tasks, blockers, and instructions remain separate
 canonical kinds. Tool output is treated only as data. The generator does not
 promote text into an instruction channel.
@@ -34,8 +43,8 @@ promote text into an instruction channel.
 
 The mandatory first layer contains identity, objective, phase, repository,
 tests, one next action, and provenance. Under budget pressure the generator
-removes lower-priority file, completion, decision, and secondary-task details
-in that order. It never deletes or modifies source events. A budget too small
+removes lower-priority file, completion, decision, secondary-task, and
+observation details in that order. It never deletes or modifies source events. A budget too small
 for the mandatory layer is rejected instead of silently truncating identity or
 provenance.
 

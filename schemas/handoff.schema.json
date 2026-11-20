@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sessionmesh.dev/schemas/handoff/1.0",
+  "$id": "https://sessionmesh.dev/schemas/handoff/1.1",
   "title": "SessionMesh Handoff",
   "type": "object",
   "additionalProperties": false,
@@ -19,7 +19,7 @@
     "provenance"
   ],
   "properties": {
-    "schema_version": { "const": "1.0" },
+    "schema_version": { "enum": ["1.0", "1.1"] },
     "global_session_id": { "type": "string", "pattern": "^gs_[A-Za-z0-9_-]+$" },
     "objective": { "type": "string", "minLength": 1 },
     "status": {
@@ -56,6 +56,16 @@
     },
     "relevant_files": { "$ref": "#/$defs/nonEmptyStrings" },
     "next_action": { "type": "string", "minLength": 1 },
+    "latest_user_request": {
+      "description": "Added in 1.1. Latest user message as an unclassified observation; never a task by itself.",
+      "type": "string",
+      "minLength": 1
+    },
+    "latest_assistant_reply": {
+      "description": "Added in 1.1. Latest assistant message as an unverified observation; never completed work by itself.",
+      "type": "string",
+      "minLength": 1
+    },
     "provenance": {
       "type": "array",
       "minItems": 1,
