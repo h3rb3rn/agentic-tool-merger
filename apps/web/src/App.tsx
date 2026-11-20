@@ -209,9 +209,13 @@ function Timeline({
     "none" | "topic" | "date" | "size"
   >("date");
   const [sessionFilter, setSessionFilter] = useState("");
+  const [sessionCursors, setSessionCursors] = useState<
+    Array<string | undefined>
+  >([undefined]);
+  const sessionCursor = sessionCursors.at(-1);
   const sessions = useQuery({
-    queryKey: ["sessions"],
-    queryFn: () => client.listSessions(),
+    queryKey: ["sessions", sessionCursor],
+    queryFn: () => client.listSessions(sessionCursor),
   });
   const effectiveId = selectedId || sessions.data?.items[0]?.id || "";
   const selectedSession = sessions.data?.items.find(
@@ -365,6 +369,27 @@ function Timeline({
           {sessions.data && visibleSessions.length === 0 && (
             <p>No sessions match this filter</p>
           )}
+          <nav aria-label="Session pages">
+            <button
+              type="button"
+              disabled={sessionCursors.length <= 1 || sessions.isPending}
+              onClick={() => setSessionCursors(sessionCursors.slice(0, -1))}
+            >
+              Previous sessions
+            </button>
+            <button
+              type="button"
+              disabled={!sessions.data?.next_cursor || sessions.isPending}
+              onClick={() =>
+                setSessionCursors([
+                  ...sessionCursors,
+                  sessions.data!.next_cursor!,
+                ])
+              }
+            >
+              Next sessions
+            </button>
+          </nav>
           <nav aria-label="Session hierarchy">
             {sessionBranches.map((branch) => {
               const branchIsActive = branch.groups.some((group) =>

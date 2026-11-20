@@ -5,6 +5,16 @@ changes to SessionMesh are recorded here.
 
 ## Unreleased
 
+### Grok Build
+
+- Added read-only, bounded incremental import of authoritative Grok ACP update
+  logs in the daemon and network collector. Prompts, assistant responses and
+  reasoning retain native session/workspace identity, timestamps and exact
+  provenance; tool dumps and duplicate chat snapshots are excluded.
+- Grok conversations now participate in correlation, search and shared handoffs.
+  Added previous/next session pages so the GUI can reach archives beyond its
+  first 200 session summaries.
+
 ### Web authentication
 
 - Recover from rejected saved API tokens with an explicit login message, cleared

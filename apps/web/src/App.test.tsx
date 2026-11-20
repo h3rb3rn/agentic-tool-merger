@@ -564,3 +564,36 @@ describe("saved API token recovery", () => {
     expect(sessionStorage.getItem("api-token")).toBe("replacement-token");
   });
 });
+
+describe("session archive pages", () => {
+  it("reaches Grok sessions beyond the initial page and can return", async () => {
+    const api = client({
+      listSessions: vi.fn().mockImplementation((cursor) =>
+        Promise.resolve({
+          items: cursor
+            ? [
+                {
+                  ...sessions[0],
+                  id: "grok:native",
+                  tool_family: "grok",
+                  thread_title: "Grok Build conversation",
+                },
+              ]
+            : sessions,
+          next_cursor: cursor ? null : "session-next",
+        }),
+      ),
+    });
+    render(<App client={api} />);
+    await screen.findByRole("button", { name: /Implement session timeline/ });
+    fireEvent.click(screen.getByRole("button", { name: "Next sessions" }));
+    expect(
+      await screen.findByRole("button", { name: /Grok Build conversation/ }),
+    ).toBeInTheDocument();
+    expect(api.listSessions).toHaveBeenLastCalledWith("session-next");
+    fireEvent.click(screen.getByRole("button", { name: "Previous sessions" }));
+    expect(
+      await screen.findByRole("button", { name: /Implement session timeline/ }),
+    ).toBeInTheDocument();
+  });
+});

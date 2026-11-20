@@ -76,7 +76,7 @@ export interface GlobalSessionDetail {
 }
 
 export interface SessionMeshClient {
-  listSessions(): Promise<Page<NativeSession>>;
+  listSessions(cursor?: string): Promise<Page<NativeSession>>;
   listEvents(
     sessionId: string,
     kind?: string,
@@ -175,7 +175,11 @@ export function createApiClient(
     });
 
   return {
-    listSessions: () => request("/api/v1/native-sessions?limit=200"),
+    listSessions: (cursor) => {
+      const query = new URLSearchParams({ limit: "200" });
+      if (cursor) query.set("cursor", cursor);
+      return request(`/api/v1/native-sessions?${query.toString()}`);
+    },
     listEvents: (sessionId, kind, cursor) => {
       const query = new URLSearchParams({
         native_session_id: sessionId,

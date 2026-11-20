@@ -172,7 +172,7 @@ for the full field reference.
    ```
 
    It discovers and scans the same native tool stores the daemon would scan
-   locally (Codex, Claude Code, Continue, Agy, OpenCode), under `HOME` (or
+   locally (Codex, Claude Code, Continue, Agy, OpenCode, Grok Build), under `HOME` (or
    `SESSIONMESH_PROFILE_ROOT`/`CODEX_HOME` when those differ), and holds no
    local state: it asks the daemon for each source's last committed cursor
    before every scan, so a restarted or reprovisioned collector always

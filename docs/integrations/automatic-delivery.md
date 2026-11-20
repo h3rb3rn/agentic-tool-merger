@@ -43,9 +43,50 @@ never rewritten. Restart clients after installation. Project or managed
 configuration can override a user registration; check the effective server list
 from the intended project directory.
 
-MCP availability is distinct from import support: Grok can consume shared
-handoffs, but this change does not add a Grok transcript importer. Agy ingestion
-still covers prompt history rather than complete assistant trajectories.
+MCP availability is distinct from import support. Grok Build now also imports
+its authoritative ACP conversation logs; see [Grok Build import](#grok-build-import).
+Agy ingestion still covers prompt history rather than complete assistant trajectories.
+
+## Grok Build import
+
+The daemon and remote collector discover
+`.grok/sessions/<encoded-cwd>/<session-id>/updates.jsonl` under their configured
+profile root. The container's existing read-only `/sources/home` mount covers
+this location. The host-facing original path is retained in provenance. A
+nonstandard Grok home must be mapped to `.grok` beneath that profile root.
+
+The adapter was verified against Grok Build 1.0.89 and its installed session
+format documentation. `updates.jsonl` is the authoritative ACP update log;
+`chat_history.jsonl`, summary files, compaction checkpoints, generated exports,
+artifacts and tool dumps are not imported as additional transcripts. Discovery
+uses exactly two directory levels and does not follow session-directory or log
+symlinks. Long encoded paths use Grok's `.cwd` sidecar; other group names are
+URL-decoded, preserving literal plus signs and Unicode.
+
+Native `user_message_chunk`, `agent_message_chunk` and `agent_thought_chunk`
+updates become user, assistant and unknown/reasoning events respectively.
+Each chunk is retained individually, including its original content object,
+metadata and byte-exact JSONL evidence. Reasoning remains data. Text, code blocks
+and attachments are not shortened or replaced by summaries. Other operational
+updates, including tool invocations/results, are outside this conversation-only
+adapter surface, even when full tool retention is enabled elsewhere.
+Explicit SessionMesh-origin updates marked `ingestion_excluded` are excluded.
+
+Native session IDs are namespaced as `grok:<id>`. Native microsecond timestamps
+are preferred, followed by agent milliseconds and older second timestamps;
+line order, offsets and deterministic IDs retain tie-break evidence. Missing
+or invalid native conversation time, mismatched session identity and malformed
+complete JSON records fail explicitly without advancing the cursor. Partial
+trailing lines wait for completion. Appends use the shared 4 MiB newline batch
+target, allowing one larger record intact. Persisted cursors support restart;
+truncation/first-line replacement uses the existing idempotent replay path.
+
+Grok sessions participate in workspace correlation, search, handoffs and the
+Web UI under tool family `grok`. Use **Next sessions** / **Previous sessions**
+to reach archive pages beyond the first 200 records; filters apply to the
+current page. Import does not run Grok, invoke models, alter client settings or
+write native stores. Existing MCP registration continues to provide outbound
+context delivery.
 
 ## Transport and permissions
 

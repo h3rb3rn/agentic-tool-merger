@@ -16,7 +16,8 @@ use sessionmesh_ingest::codex::{
     CodexDiscoveryInput, CodexHome, CodexSourceKind, IncrementalInput, discover, ingest_file,
 };
 use sessionmesh_ingest::external::{
-    ExternalSource, discover_agy, discover_claude, discover_continue, ingest_external,
+    ExternalSource, discover_agy, discover_claude, discover_continue, discover_grok,
+    ingest_external,
 };
 use sessionmesh_ingest::opencode::{OpenCodeSource, discover_opencode, ingest_opencode};
 use sessionmesh_storage::{
@@ -325,6 +326,10 @@ fn external_sources(profile_root: &Path, original_root: &Path) -> Vec<ExternalSo
     sources.extend(discover_continue(
         &profile_root.join(".continue"),
         &original_root.join(".continue"),
+    ));
+    sources.extend(discover_grok(
+        &profile_root.join(".grok"),
+        &original_root.join(".grok"),
     ));
     sources.extend(discover_agy(
         &profile_root.join(".gemini/antigravity-cli"),
@@ -1082,6 +1087,39 @@ mod tests {
                 .expect("workspace evidence should be present");
             assert_eq!(workspace_evidence["matched"], false);
         }
+    }
+
+    #[tokio::test]
+    async fn grok_discovery_reaches_global_handoff_without_changing_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory
+            .path()
+            .join(".grok/sessions/%2Fwork%2Fproject/native-session");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("updates.jsonl");
+        let bytes = concat!(
+            "{\"timestamp\":1795000000,\"params\":{\"sessionId\":\"native-session\",\"update\":{\"sessionUpdate\":\"user_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Implement Grok import\"}}}}\n",
+            "{\"timestamp\":1795000001,\"params\":{\"sessionId\":\"native-session\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Implemented Grok import\"}}}}\n"
+        );
+        fs::write(&path, bytes).unwrap();
+        let storage = Storage::open(
+            directory.path().join("state.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .unwrap();
+        let state = ApiState::new(storage.clone(), "test-token", Vec::new());
+        let sources = external_sources(directory.path(), Path::new("/host"));
+        assert_eq!(sources.len(), 1);
+        let mut memory = ScanMemory::default();
+        scan_external_once(&state, &sources, &mut memory).await;
+        scan_external_once(&state, &sources, &mut memory).await;
+        assert_eq!(storage.event_count().await.unwrap(), 2);
+        Reconciler::default().reconcile(&state, 0.8).await.unwrap();
+        let global = storage.list_global_sessions().await.unwrap().pop().unwrap();
+        let handoff = storage.latest_handoff(&global.id).await.unwrap().unwrap();
+        assert!(handoff.handoff_json.contains("Implemented Grok import"));
+        assert_eq!(fs::read_to_string(path).unwrap(), bytes);
     }
 
     #[test]

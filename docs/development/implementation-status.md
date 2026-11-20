@@ -670,3 +670,28 @@ token reset also passes. An intercepted HTTP 500 preserved the token, displayed
 its status and recovered through Retry after the interception was removed.
 There were zero JavaScript errors. Credentials/session text were not logged.
 Changes are published on `fix/gui-auth-recovery`; the state volume is preserved.
+
+## Grok Build import — 2026-11-20
+
+The user explicitly requested Grok Build implementation. Previous integration
+provided only outbound MCP context. Installed Grok Build 1.0.89 documentation
+and local file-shape inspection identify `updates.jsonl` as the authoritative
+conversation log; `chat_history.jsonl` reflects model context/compaction.
+There are 156 native update logs totaling approximately 615 MB at inspection.
+No private conversation or credential contents are copied into fixtures/docs.
+The exposed SessionMesh MCP transport is still closed; state is verified locally.
+
+Implemented exact-depth, read-only discovery in daemon and collector, bounded
+append parsing of user/assistant/thought chunks, URL-encoded and `.cwd` workspace
+mapping, native-time precedence, deterministic provenance and incremental
+cursors. Nonconversation operational/tool updates are not another persistent
+code history. Unknown native attachment content is preserved in the original
+content object and raw evidence. Native stores remain read-only.
+
+Focused integration tests failed before the adapter existed. They now cover
+mixed conversation/tool records, Unicode/code preservation, partial appends,
+stable identity, original path/byte offset, long-CWD sidecars, explicit malformed
+records, bounded batches/oversized replies and replacement. A daemon integration
+test verifies discovery through global-session handoff without source changes.
+A GUI regression failed before adding archive cursor navigation to reach Grok
+sessions beyond the first 200 records. Runtime deployment verification follows.

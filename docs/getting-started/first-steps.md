@@ -295,10 +295,13 @@ transcript.
 
 ## Import coverage
 
-MCP delivery and transcript import are separate capabilities. OpenCode sessions
-and Agy prompt history can be imported. Complete Agy assistant trajectories
-and a Grok transcript importer are not implemented by this connector setup.
-Grok can still retrieve context produced from supported sources.
+MCP delivery and transcript import are separate capabilities. OpenCode sessions,
+Agy prompt history and Grok Build conversation updates can be imported. Grok
+prompts, replies and reasoning appear under `grok`; its sessions also contribute
+to shared handoffs. Use **Next sessions** and **Previous sessions** to browse
+beyond the first 200 records. Complete Agy assistant trajectories remain outside
+the current import coverage. See the
+[Grok Build import contract](../integrations/automatic-delivery.md#grok-build-import).
 
 ## Troubleshooting
 

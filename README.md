@@ -140,8 +140,8 @@ must never be copied into `.env`, `.env.example`, documentation, or Git.
 
 ## Project state
 
-The MVP implementation includes active Codex, Claude Code, Continue, OpenCode,
-and Agy ingestion, immutable raw and canonical storage, authenticated REST/SSE,
+The implementation includes active Codex, Claude Code, Continue, OpenCode,
+Agy and Grok Build ingestion, immutable raw and canonical storage, authenticated REST/SSE,
 the responsive timeline, explainable audited global-session correlation,
 thread-title navigation with topic/date/size organization, cross-tool keyword
 search, human-readable event content, deterministic handoff

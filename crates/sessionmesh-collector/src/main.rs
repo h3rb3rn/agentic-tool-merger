@@ -25,8 +25,8 @@ use sessionmesh_ingest::codex::{
     prepare_incremental,
 };
 use sessionmesh_ingest::external::{
-    ExternalSource, discover_agy, discover_claude, discover_continue, external_source_id,
-    prepare_external,
+    ExternalSource, discover_agy, discover_claude, discover_continue, discover_grok,
+    external_source_id, prepare_external,
 };
 use sessionmesh_ingest::opencode::{
     OpenCodeSource, discover_opencode, opencode_source_id, prepare_opencode,
@@ -131,6 +131,10 @@ fn external_sources(profile_root: &Path, original_root: &Path) -> Vec<ExternalSo
     sources.extend(discover_continue(
         &profile_root.join(".continue"),
         &original_root.join(".continue"),
+    ));
+    sources.extend(discover_grok(
+        &profile_root.join(".grok"),
+        &original_root.join(".grok"),
     ));
     sources.extend(discover_agy(
         &profile_root.join(".gemini/antigravity-cli"),
