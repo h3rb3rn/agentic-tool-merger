@@ -792,3 +792,19 @@ Coverage now verifies all client guides, rate-limit workflow, native/cross-clien
 semantics, copy selection, public/no-fetch routing and preserved timeline state.
 The exposed SessionMesh MCP transport was closed at the initial handoff attempt;
 confirmed facts and changes are persisted in this ledger and canonical docs.
+
+Validation passes: all 31 web tests and twelve repository/schema/security tests,
+formatting, ESLint, TypeScript, production build and strict MkDocs. Rust and API
+behavior are unchanged. The deployed image is
+`sha256:67ed385bd375c0173c0a3f7e38b317f54c4f342d37eb72109f67e00e5b298623`;
+Compose and HTTP health are healthy and the state volume is preserved.
+
+A real Chromium check loaded all six client guides without authentication and
+made no private API requests, including after reloading a direct FAQ link with
+a saved login. HTTP-origin command selection/manual-copy guidance, agent section
+anchors and mobile width checks pass. After authenticated OpenCode navigation,
+returning from the FAQ preserved the native session, filter, sort and grouping
+without another session-page fetch. JavaScript errors were zero. No conversation
+or credentials were printed. Fresh MCP negotiation, five tools and workspace
+handoff delivery pass. Changes are published on `feat/web-faq-session-handoffs`
+without modifying main.
