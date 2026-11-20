@@ -766,3 +766,29 @@ session-page request was scoped to an agent. There were no speculative event
 payload requests before disclosure and zero JavaScript errors. Health and a
 fresh MCP five-tool/workspace-handoff check pass. The change is published on
 `fix/all-tools-navigation` without modifying main.
+
+## Web FAQ and cross-client continuation — 2026-11-20
+
+The user requested a Web UI FAQ with per-agent native resume and SessionMesh
+context commands, including continuation in another client after a rate limit.
+All six clients' syntax was checked against installed CLI help: Codex 0.170.0,
+Claude Code 2.1.328, Agy 1.5.13, OpenCode 2.2.7, Grok Build 1.0.89 and Continue
+CLI 1.5.43. OpenCode help required temporary XDG directories because its default
+log path is read-only; real client settings, histories and credentials were not
+changed. No model sessions were started to validate documentation commands.
+
+The static FAQ explains native-history ownership, new-session handoffs,
+workspace/membership verification, search provenance, provider-quota boundaries
+and coverage gaps. It uses the actual MCP read schema and documents Continue's
+boolean resume flag and OpenCode's existing-ID requirement. It includes
+copyable shell commands and clearly labelled in-agent prompts for each client.
+Header and login links use FAQ hash routes/section anchors. The prior timeline
+stays mounted when visited and is restored on return; a direct FAQ visit avoids
+private archive requests even with a saved login. Clipboard denial or HTTP
+secure-context restrictions produce explicit text-selection/manual-copy guidance.
+
+Focused tests failed before implementation for the absent FAQ/navigation.
+Coverage now verifies all client guides, rate-limit workflow, native/cross-client
+semantics, copy selection, public/no-fetch routing and preserved timeline state.
+The exposed SessionMesh MCP transport was closed at the initial handoff attempt;
+confirmed facts and changes are persisted in this ledger and canonical docs.

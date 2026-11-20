@@ -17,6 +17,7 @@ import {
   ApiError,
 } from "./api";
 import { eventLabel, mergeChronologicalEvents } from "./timeline";
+import { Faq } from "./Faq";
 
 export interface AppProps {
   client?: SessionMeshClient;
@@ -32,6 +33,21 @@ export function App({ client }: AppProps) {
   const [token, setToken] = useState(
     () => sessionStorage.getItem("api-token") ?? "",
   );
+  const [showFaq, setShowFaq] = useState(() =>
+    window.location.hash.startsWith("#faq"),
+  );
+  const [hasVisitedSessions, setHasVisitedSessions] = useState(
+    () => !window.location.hash.startsWith("#faq"),
+  );
+  useEffect(() => {
+    const updatePage = () => {
+      const faq = window.location.hash.startsWith("#faq");
+      setShowFaq(faq);
+      if (!faq) setHasVisitedSessions(true);
+    };
+    window.addEventListener("hashchange", updatePage);
+    return () => window.removeEventListener("hashchange", updatePage);
+  }, []);
   const [authMessage, setAuthMessage] = useState("");
   const disconnect = (message = "") => {
     sessionStorage.removeItem("api-token");
@@ -57,12 +73,17 @@ export function App({ client }: AppProps) {
     [client, token, queryClient],
   );
 
-  if (!activeClient) {
-    return <TokenSetup onSave={setToken} message={authMessage} />;
-  }
   return (
     <QueryClientProvider client={queryClient}>
-      <Timeline client={activeClient} onDisconnect={() => disconnect()} />
+      {activeClient && hasVisitedSessions && (
+        <div hidden={showFaq}>
+          <Timeline client={activeClient} onDisconnect={() => disconnect()} />
+        </div>
+      )}
+      {!activeClient && !showFaq && (
+        <TokenSetup onSave={setToken} message={authMessage} />
+      )}
+      {showFaq && <Faq />}
     </QueryClientProvider>
   );
 }
@@ -88,6 +109,9 @@ function TokenSetup({
       <p className="eyebrow">LOCAL AUTHENTICATION</p>
       <h1>SessionMesh</h1>
       <p>Enter the token from your SessionMesh home. It remains in this tab.</p>
+      <p>
+        <a href="#faq">FAQ: sessions and agent handoffs</a>
+      </p>
       {message && <p role="alert">{message}</p>}
       <p>Read the current token on the host:</p>
       <pre>
@@ -327,16 +351,21 @@ function Timeline({
   return (
     <main className="app-shell">
       <header>
-        <button type="button" onClick={onDisconnect}>
-          Change API token
-        </button>
         <div>
           <p className="eyebrow">LOCAL-FIRST SESSION OBSERVABILITY</p>
           <h1>SessionMesh</h1>
         </div>
-        <span className={connected ? "connection live" : "connection stale"}>
-          {connected ? "Live" : "Reconnecting — showing stale data"}
-        </span>
+        <nav aria-label="Page navigation" className="header-actions">
+          <a href="#faq" className="faq-link">
+            FAQ
+          </a>
+          <button type="button" onClick={onDisconnect}>
+            Change API token
+          </button>
+          <span className={connected ? "connection live" : "connection stale"}>
+            {connected ? "Live" : "Reconnecting — showing stale data"}
+          </span>
+        </nav>
       </header>
       <div className="workspace">
         <aside aria-label="Native sessions">

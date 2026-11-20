@@ -5,6 +5,16 @@ changes to SessionMesh are recorded here.
 
 ## Unreleased
 
+### Web FAQ
+
+- Added a public FAQ page with verified native resume, MCP setup and cross-client
+  handoff commands for Codex, Claude Code, Agy, OpenCode, Grok Build and Continue.
+  Includes rate-limit continuation, source-ID guidance, import limitations,
+  manual handoffs and connection troubleshooting.
+- Added header/login links, direct section anchors and copy controls with manual
+  selection on HTTP origins. Returning from the FAQ preserves timeline state;
+  direct FAQ links avoid archive requests even with saved authentication.
+
 ### Agent navigation
 
 - Keep every imported agent in the left navigation using an authenticated,

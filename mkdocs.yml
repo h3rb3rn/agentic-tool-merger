@@ -41,6 +41,7 @@ nav:
   - Home: index.md
   - Getting Started:
       - First Steps: getting-started/first-steps.md
+      - Session Handoff FAQ: getting-started/session-handoffs.md
   - Architecture:
       - Complete Project Plan: architecture/project-plan.md
       - Canonical Events: architecture/canonical-events.md

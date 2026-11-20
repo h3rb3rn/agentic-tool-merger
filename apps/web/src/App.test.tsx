@@ -709,3 +709,44 @@ it("loads correlation metadata outside the selected agent without loading its fu
   expect(api.getSession).toHaveBeenCalledWith("opencode:peer");
   expect(api.listSessions).toHaveBeenLastCalledWith(undefined, "codex");
 });
+
+it("opens the FAQ without authentication or API requests", async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  window.history.replaceState(null, "", "/#faq");
+  render(<App />);
+  expect(
+    screen.getByRole("heading", { name: "FAQ: sessions and agent handoffs" }),
+  ).toBeInTheDocument();
+  expect(fetch).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});
+
+it("keeps session navigation state while opening and closing the FAQ", async () => {
+  const api = client();
+  render(<App client={api} />);
+  const session = await screen.findByRole("button", {
+    name: /Implement session timeline/,
+  });
+  fireEvent.click(session);
+  fireEvent.click(screen.getByRole("link", { name: "FAQ" }));
+  await screen.findByRole("heading", {
+    name: "FAQ: sessions and agent handoffs",
+  });
+  fireEvent.click(screen.getByRole("link", { name: "Back to sessions" }));
+  await screen.findByRole("button", { name: /Implement session timeline/ });
+  expect(api.listSessions).toHaveBeenCalledTimes(1);
+  expect(window.location.search).toContain("session=");
+});
+
+it("opens a direct FAQ link with a saved login without loading the session archive", () => {
+  window.history.replaceState(null, "", "/#faq-agent-opencode");
+  sessionStorage.setItem("api-token", "saved-test-token");
+  const api = client();
+  render(<App client={api} />);
+  expect(
+    screen.getByRole("heading", { name: "FAQ: sessions and agent handoffs" }),
+  ).toBeInTheDocument();
+  expect(api.listSessionTools).not.toHaveBeenCalled();
+  expect(api.listSessions).not.toHaveBeenCalled();
+});

@@ -208,6 +208,11 @@ of expanding it with the rest of the archive. A full live page offers
 through at most four concurrent detail requests. Individual failures show a
 visible error and **Retry**; changing pages cancels obsolete requests.
 
+The Web UI's **FAQ** link provides per-client resume commands and copyable
+cross-client handoff commands, including rate-limit recovery. It is also
+available before login at `/#faq`. See the
+[session handoff FAQ](session-handoffs.md) for the full reference.
+
 ## Normal daily use
 
 Always start an agent from the project directory:
