@@ -17,6 +17,7 @@ sessionmesh-storage = { path = "../sessionmesh-storage" }
 tokio.workspace = true
 
 [dev-dependencies]
+sqlx.workspace = true
 tempfile.workspace = true
 
 [lints]

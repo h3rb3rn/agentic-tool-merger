@@ -172,7 +172,11 @@ Every imported native session is first stored unchanged with:
 - permissions; and
 - origin.
 
-A summary never replaces the raw store.
+A summary never replaces retained raw evidence.
+[ADR-011](../adr/011-conversation-retention-and-bounded-resources.md) refines
+retention after the user's resource-management request: prompts and AI replies
+remain permanent; separate tool/code bodies and superseded derived snapshots
+are disposable. Retained byte content and canonical identities are immutable.
 
 ### 3.3 Normalized events
 

@@ -1,9 +1,17 @@
 #!/bin/sh
 set -eu
 
-# Preserve the MCP client's host working directory as correlation evidence.
+# Correlate the caller's host workspace, even when the service is containerized.
+export SESSIONMESH_PROJECT_ROOT="${SESSIONMESH_PROJECT_ROOT:-$PWD}"
+export SESSIONMESH_MCP_ALLOW_WRITES="${SESSIONMESH_MCP_ALLOW_WRITES:-false}"
+
+if [ -n "${SESSIONMESH_MCP_BINARY:-}" ]; then
+  : "${SESSIONMESH_HOME:?SESSIONMESH_HOME is required for a native MCP server}"
+  exec "$SESSIONMESH_MCP_BINARY"
+fi
+
 exec docker exec -i \
-  -e "SESSIONMESH_PROJECT_ROOT=$PWD" \
-  -e SESSIONMESH_MCP_ALLOW_WRITES=true \
-  agenttool-merger-sessionmesh-1 \
+  -e "SESSIONMESH_PROJECT_ROOT=$SESSIONMESH_PROJECT_ROOT" \
+  -e "SESSIONMESH_MCP_ALLOW_WRITES=$SESSIONMESH_MCP_ALLOW_WRITES" \
+  "${SESSIONMESH_CONTAINER:-agenttool-merger-sessionmesh-1}" \
   sessionmesh-mcp

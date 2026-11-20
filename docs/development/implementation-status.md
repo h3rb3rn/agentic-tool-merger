@@ -6,16 +6,17 @@ This page is the canonical restart and execution ledger.
 
 - **Current milestone:** Milestone 3 multi-tool correlation implemented
 - **Active prompt:** None
-- **Next prompt:** Decode supported Agy assistant trajectory exports
+- **Next prompt:** None; MVP prompts 00–14 are complete
 - **Last completed prompt:** 14 — MVP Hardening
-- **Known blockers:** None
+- **Known blockers:** User home and source Git metadata are read-only in the current coding environment; intermittent initial-import writer contention remains an open operational issue
 
 The running integration foundation now discovers Claude Code, Continue,
 OpenCode, and Agy sessions from a read-only agent home, correlates sessions by
 normalized workspace, bounded temporal proximity, and lexical content evidence,
 persists uncertain candidates for review, refreshes deterministic handoffs,
-and delivers them to Codex, Claude Code, and Continue through MCP and startup
-connectors. Native transcript synchronization remains intentionally excluded:
+and provides MCP connectors for Codex, Claude Code, Agy, OpenCode v2, Grok
+Builder, and optional Continue. Live delivery requires the service described
+in the maintenance audit below. Native transcript synchronization remains intentionally excluded:
 shared knowledge is delivered as provenance-backed context without mutating
 tool-owned stores.
 
@@ -359,10 +360,10 @@ Known limitations:
 
 - The daemon currently polls discovery rather than using native watcher
   notifications; unchanged files are skipped by size and modification time.
-- Large-store API sorting still loads canonical event projections before
-  pagination.
-- Reconciliation, Claude Code ingestion, and OpenCode ingestion are
-  incremental (ADR-010); Continue and Agy still reread changed snapshot files.
+- Historical limitation (resolved by resource maintenance below): API/SSE
+  previously loaded payload-bearing events before pagination.
+- Reconciliation, Claude Code, Agy and OpenCode ingestion are incremental;
+  Continue still processes one changed JSON snapshot at a time.
 - OpenCode imports text parts from its allowlisted SQLite session tables. Agy
   currently imports stable prompt history; protobuf assistant trajectories
   await a supported schema or export surface.
@@ -386,3 +387,256 @@ be pushed automatically.
 Next roadmap decision: add supported Agy trajectory decoding or optimize the
 Codex watcher and large-store query path using representative sanitized
 fixtures.
+
+## MCP connector maintenance — 2026-11-19
+
+The user requested a project review focused on MCP integration for Claude Code,
+Codex, Agy, OpenCode, and Grok Builder. The compact SessionMesh tools were not
+exposed in this session, so a handoff could not be retrieved or a durable MCP
+observation recorded. Repository and client facts were verified locally.
+
+The previous `Next prompt` named an Agy roadmap task without a corresponding
+implementation prompt. It now correctly states that no ordered MVP prompt is
+pending. Supported Agy assistant trajectory decoding remains a roadmap task.
+
+Verified operational blockers and evidence:
+
+- Codex, Claude, and Agy already reference the bridge. OpenCode v2.2.7 lacks an
+  entry; Grok has no native entry but supports compatibility discovery.
+- The bridge's default Docker container is absent, as are SessionMesh-named
+  volumes and the conventional native state home. A direct MCP check failed
+  with `No such container` and transport closure. Existing state may be stored
+  elsewhere; no empty replacement database or service was created.
+- `/home/philipp` is read-only. Client installation was previewed without
+  changing user configuration.
+- `.git` is read-only: creating `fix/mcp-client-integrations` failed while
+  locking its ref. Work remains uncommitted on the existing non-main branch;
+  no staging, commits, or pushes were attempted.
+
+Implemented selective installation for the five requested clients, optional
+Continue, private original backups, preservation of startup instructions and
+unrelated Claude hooks, OpenCode v2 CLI preflight, configurable container/native
+bridges, explicit write opt-in, and a bounded protocol/handoff check. Startup
+injection now retains delivery origin metadata and exposes unavailable context
+as failure rather than silently succeeding. See the
+[local integration audit](../integrations/automatic-delivery.md).
+
+Condition for live completion: locate or restore the existing SessionMesh
+service and state, apply the prepared installation in a writable host session,
+restart clients, and retrieve a handoff from the intended workspace. Durable
+MCP task/decision recording can resume after that connection is restored.
+
+Validation for connector maintenance:
+
+- Eight isolated Python regression tests pass, including original backups,
+  idempotent hooks/instructions, per-client command syntax, dry-run behavior,
+  workspace/permission forwarding, missing-context failure, lifecycle ordering,
+  and private handoff output suppression.
+- Codex MCP registration was also repeated successfully against an isolated
+  `/tmp` configuration using the installed CLI; the second add safely replaces
+  the entry. The real user configuration was not modified.
+- Six Rust MCP tests and MCP doc tests pass with Rust 1.88. Cargo's normal cache
+  is read-only; the successful run used a dedicated cache under `/tmp`.
+- Twelve Node repository/schema/security contract tests and twelve web tests
+  pass. ESLint, TypeScript, and the production web build pass.
+- Strict MkDocs, Compose configuration validation, shell syntax checks,
+  `git diff --check`, and Prettier on changed Markdown/JavaScript files pass.
+- The aggregate `npm run check` stops at pre-existing formatting differences in
+  `docs/api/ingest.md`, `docs/architecture/deployment.md`,
+  `docs/development/configuration.md`, and `docs/security/threat-model.md`.
+  Those unrelated files were left unchanged; its later checks were run
+  separately as recorded above.
+- The live MCP check correctly fails because the configured container does not
+  exist. No live-client success is claimed.
+
+## Resource-management maintenance — 2026-11-20
+
+The user authorized permanent prompts and AI replies, removal of redundant code
+versions, scheduled cleanup, and bounded RAM/disk use. No SessionMesh MCP tools
+were exposed; durable decisions and verified work are recorded here and in
+ADR-011. The existing native home and `.git` remain read-only, so changes stay
+uncommitted on the pre-existing non-main branch. Earlier connector work is
+preserved.
+
+Verified causes include whole-payload API/SSE and MCP workspace-resolution loads, unbounded correlation
+vocabulary and snapshot history, full-JSON FTS duplication, whole-history Agy
+and OpenCode imports, uncollected tool dumps/orphan blobs, and unbounded
+container logs/resources. The local Cargo target also held about 13 GiB of
+build artifacts, separate from session persistence.
+
+A synthetic soak reproduced an additional Codex bug: resumed imports lost the
+native session ID and created fallback-session/global-context entries. A
+focused regression test failed (`fallback` versus `session-1`) before the
+incremental parser was changed to seed native header identity/workspace. The
+initial soak caught the duplicate context through its expected retained-handoff
+count; that failure was investigated instead of relaxing the assertion.
+
+Implemented shared persistent conversation retention, protected raw references,
+legacy Claude tool-envelope cleanup, recoverable blob GC, bounded snapshot
+retention, cleanup revision-triggered handoff rebuilding, exact-order metadata
+pages, incremental session aggregates, bounded active context/cache, bounded
+Codex/Claude/Agy reads, OpenCode continuation pages, administration commands,
+container budgets, rotated logs, and the synthetic soak harness. Migration 0005
+preserves existing conversations and stable IDs; tool-body deletion is performed
+by the configured maintenance policy after upgrade, not by schema migration.
+See the resource-management operations guide for backup, opt-out, and large
+legacy database compaction requirements.
+
+Validation and final measurements are recorded below after completion. A live
+production/container rollout remains unavailable because the former service and
+state volume are absent. No real native session data or unrelated Docker
+storage has been deleted.
+
+Cache cleanup removed generated dependency/build/incremental cache files totaling
+12,600,235,657 apparent bytes (about 11.7 GiB). About 75 MB of inaccessible
+incremental files remained due to ownership; permissions were not bypassed.
+`target` fell to approximately 1.5 GiB including the isolated validation builds.
+Native histories, existing executable paths, `.git`, images and volumes were
+not removed. Disk usage also reflects concurrent host work and hard links, so
+these cache-file counts are not an exact physical-volume reclamation measure.
+
+Final validation for resource maintenance:
+
+- All 156 Rust workspace tests and doc tests pass. Formatting and workspace
+  Clippy with warnings denied pass. Tests cover exact chronology including
+  nanoseconds/time zones and wide timestamp ranges, legacy schema upgrade and
+  stable keys through vacuum, protected messages/shared raw data, idempotent
+  cleanup/replay, legacy tombstones, bounded OpenCode/Agy/Codex processing,
+  native header identity, metadata-only scope resolution, and context refresh
+  after cleanup without new messages.
+- The 70-second synthetic native run completed 1,284 authenticated API requests
+  with active imports and a slow SSE subscriber. Warm RSS was 63,896 KiB;
+  steady RSS was 63,912–63,928 KiB. All 728 expected conversation events survived,
+  including Unicode/code content; tool-result bodies were absent and one latest
+  handoff remained. Source hashes were unchanged. State including WAL/blobs was
+  7,600,177 bytes for 27,966,755 bytes of synthetic source.
+- Full npm formatting/lint/TypeScript/schema/security contracts, twelve web
+  tests, the connector regression suite and production build pass. The earlier
+  four Markdown formatting findings are resolved in documents updated for this
+  resource-management change.
+- Strict MkDocs, Compose configuration validation and `git diff --check` pass.
+  Compose resolves to 1 GiB RAM/combined swap, one CPU, 128 PIDs, read-only root,
+  64 MiB temporary space and three rotated 10 MiB logs.
+- No multi-day production soak, image deployment, or Podman runtime validation
+  is claimed. The old service and state volume remain absent. The operator must
+  locate/restore state, allow migration space, and deploy the updated image to
+  apply the new runtime and cleanup policy to real sessions.
+
+## Publication and service startup — 2026-11-20
+
+The user explicitly authorized committing, pushing a feature branch, and
+starting the container in parallel. The source checkout's `.git` remains
+read-only, so publication uses a separate writable checkout synchronized with
+`origin/main` (`b1d5e69`, including the previous performance PR). The source
+checkout's Git history/branch/index are not modified.
+
+Compose build arguments now match the configured runtime UID/GID, preserving
+ownership of a new private state volume. Rust image compilation uses two jobs
+so build-time parallelism is bounded too. Docker Buildx activity data uses a
+writable temporary directory in this restricted coding environment.
+
+Publication verification: all 156 Rust tests/doc tests, strict Clippy,
+formatting, the full npm check pipeline and strict MkDocs pass in the separate
+checkout. The sensitive-data pattern scan found no credentials/private keys;
+ignored local settings/runtime files are excluded from the commit.
+
+An additional registry audit found existing dependency advisories. Compatible
+transitive updates to Seroval 1.8.2 and seroval-plugins 1.8.0 remove the runtime
+findings: `npm audit --omit=dev` reports zero. `npm audit` still reports 35
+build/development dependency findings (2 critical, 29 high, 3 moderate, 1 low).
+The deployed image serves static browser assets through Rust and contains no
+Node runtime, Vite dev server or Vitest process. This is not a claim that every
+reported advisory is exploitable or harmless.
+
+Open maintenance task: resolve the remaining development/build dependency
+advisories with compatible updates or a separately verified major-version
+upgrade; rerun npm audit and the full web toolchain. No audit error was hidden
+or reclassified as a passing full dependency audit.
+
+The previously absent service/image/state volume are being recreated under the
+user's startup authorization, using read-only native sources. Live deployment
+verification is recorded after startup below.
+
+Live startup follow-up: the first container reached healthy status with the
+configured limits, user-only state, and read-only native mount, but the MCP
+probe reproduced `database is locked` while ingestion held a writer. The cause
+was schema/journal initialization on every ordinary storage open. A focused
+writer-held regression timed out before the fix and now passes: current-schema
+readers validate checksums/readiness through WAL without requesting a write
+lock. Explicit migrations/policy writes still use their existing validation.
+The archive scanner and reconciler now run independently so initial import
+does not postpone all handoff generation. All 157 Rust tests/doc tests and
+strict Clippy pass. A follow-up image build and live verification are underway;
+no state volume is removed during recreation.
+
+The real archive additionally reproduced `BudgetTooSmall` for a long prompt
+copied into mandatory task/next-action fields. The regression failed with the
+original budget error, then passed after adding bounded UTF-8-safe excerpts to
+derived prose. Full messages and recorded observations are unchanged. All 158
+Rust tests/doc tests and strict Clippy pass with both startup fixes. The image
+is being rebuilt again to include this real-data context case; the existing
+state volume and cursors are preserved across recreation.
+
+### Deployed verification
+
+The image `sha256:61c9015426a4255dc670dae99b7ddd9cdcde533df4b084c65128b7bca421a904`
+was built and Compose recreated `agenttool-merger-sessionmesh-1` successfully.
+The container is healthy; `/api/v1/health` returns `ok` and the web application
+returns HTTP 200 at `http://192.168.155.225:8787/`. The state volume is retained
+across recreation; native sources remain mounted read-only. Inspect confirms
+UID/GID 1000, read-only root, 1 GiB memory/combined swap, one CPU and 128 PIDs.
+An observed import-time sample used approximately 178 MiB; this is not a
+long-running production soak result.
+
+Inspection during active import counted 19,276 retained conversation events,
+zero separate tool/code events and 194 generated handoffs. No maintenance
+`--apply`, volume deletion or native-store cleanup was performed during this
+startup verification.
+
+MCP negotiation, all five tools and workspace handoff delivery pass the final
+`scripts/check-sessionmesh-mcp` probe. Earlier probes returned
+`no handoff for current session` until initial reconciliation reached this
+workspace. Reconciliation logs also contain intermittent `database is locked`
+errors during concurrent archive import. Open operational task: investigate
+writer contention under sustained real-archive import and verify a longer soak.
+The successful final MCP probe does not erase the observed contention or prove
+multi-day resource stability.
+
+The deployed source passes all 158 Rust tests/doc tests, strict Clippy, the full
+npm check pipeline, formatting and strict MkDocs in the publication checkout.
+The feature branch is published separately from `main`; no merge is performed.
+
+## GUI content loading — 2026-11-20
+
+The user reported missing GUI content. Authenticated production API probes
+return sessions, events and canonical details successfully. A real headless
+Chromium run reproduced 1,466 timeline cards despite the API page size of 200.
+SSE replay expanded the selected page, and the subscription restarted whenever
+its data changed. Revealing all content then launched hundreds of parallel
+detail requests and reproduced browser `Failed to fetch` errors. Default
+metadata-only display also lacked an explanation of how to reveal messages.
+
+Focused regressions failed before the fix for bounded replay/pagination,
+request concurrency/cancellation and visible content-error recovery. The GUI
+now preserves API cursor boundaries, exposes previous/next event pages, keeps
+live pages at most 200 cards and maintains one stream per selected page/filter.
+Payload requests use four slots with cancellation and explicit retry controls.
+Raw disclosure continues to require user action.
+
+Validation: all 17 web tests and twelve repository/schema/security tests pass,
+alongside formatting, ESLint, TypeScript, the production web build and strict
+MkDocs. Rust behavior is unchanged; the OCI release compilation succeeds.
+The first test run failed all four newly added behavioral regressions before
+the implementation was changed; a fifth test additionally bounds a live tail.
+
+The rebuilt image
+`sha256:fd27328e5754cf0c43be2033a9431f290c2a504d95ae8a4580faa919b8f6fe93`
+is deployed and healthy. A production headless Chromium check authenticated
+without printing credentials or session text, loaded all 200 content blocks,
+verified prompts/replies are visible, navigated to the next page and back, and
+measured a peak of four simultaneous detail requests. JavaScript errors and
+failed detail requests were both zero. MCP negotiation, its five tools and the
+workspace handoff check also pass. The existing state volume is preserved.
+The changes are published on `fix/gui-timeline-loading` without merging main.
+SessionMesh decision recording was attempted but the connected MCP process
+refused writes; this repository ledger preserves the confirmed result.

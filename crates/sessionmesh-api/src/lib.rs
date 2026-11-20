@@ -44,6 +44,7 @@ pub struct ApiState {
     events: broadcast::Sender<EventSummary>,
     extractor: Option<Arc<dyn LocalExtractor>>,
     handoff_token_budget: usize,
+    conversation_only: bool,
 }
 
 impl ApiState {
@@ -58,6 +59,7 @@ impl ApiState {
             events,
             extractor: None,
             handoff_token_budget: 4_000,
+            conversation_only: false,
         }
     }
 
@@ -74,11 +76,21 @@ impl ApiState {
         self
     }
 
+    /// Aligns live-event delivery with the daemon's persisted retention policy.
+    #[must_use]
+    pub fn with_conversation_retention(mut self, enabled: bool) -> Self {
+        self.conversation_only = enabled;
+        self
+    }
+
     /// Publishes a safe event summary to currently connected clients.
     ///
     /// A lack of subscribers is normal. Lagging subscribers recover through
     /// their last deterministic event ID.
     pub fn publish(&self, event: &CanonicalEvent) {
+        if self.conversation_only && sessionmesh_storage::is_disposable_event(event.kind) {
+            return;
+        }
         let _ignored = self.events.send(EventSummary::from(event));
     }
 
@@ -103,10 +115,8 @@ impl ApiState {
     ) -> Result<Handoff, HandoffRefreshError> {
         let session = self
             .storage
-            .list_global_sessions()
+            .get_global_session(global_id)
             .await?
-            .into_iter()
-            .find(|session| session.id == global_id)
             .ok_or(HandoffRefreshError::NotFound)?;
         let member_ids = self
             .storage
@@ -115,10 +125,7 @@ impl ApiState {
             .into_iter()
             .map(|member| member.native_session_id)
             .collect::<Vec<_>>();
-        let events = self
-            .storage
-            .list_canonical_events_for_sessions(&member_ids)
-            .await?;
+        let events = self.storage.recent_context(&member_ids, 256).await?;
         let records = self
             .storage
             .list_session_records(global_id)
@@ -330,20 +337,29 @@ async fn native_sessions(
     authorize(&state, &headers)?;
     let limit = page_size(query.limit)?;
     let after = decode_cursor(query.cursor.as_deref(), "session")?;
-    let sessions = state.storage.list_native_sessions().await?;
-    let events = state.storage.list_canonical_events().await?;
     if let Some(cursor) = &after
-        && !sessions.iter().any(|session| session.id == *cursor)
+        && state.storage.get_native_session(cursor).await?.is_none()
     {
         return Err(ApiError::InvalidCursor);
     }
-    Ok(Json(page_sessions(
-        sessions,
-        after.as_deref(),
-        limit,
-        query.tool_family.as_deref(),
-        &events,
-    )))
+    let mut matching = state
+        .storage
+        .native_session_page(after.as_deref(), limit + 1, query.tool_family.as_deref())
+        .await?;
+    let has_more = matching.len() > limit;
+    matching.truncate(limit);
+    let next_cursor = if has_more {
+        matching
+            .last()
+            .map(|session| encode_cursor("session", &session.id))
+    } else {
+        None
+    };
+    let mut items = Vec::with_capacity(matching.len());
+    for session in matching {
+        items.push(summarize_session(&state.storage, session).await?);
+    }
+    Ok(Json(Page { items, next_cursor }))
 }
 
 /// Secret-free native session summary.
@@ -367,37 +383,6 @@ pub struct SessionSummary {
     pub content_bytes: usize,
 }
 
-fn page_sessions(
-    sessions: Vec<StoredNativeSession>,
-    after: Option<&str>,
-    limit: usize,
-    family: Option<&str>,
-    events: &[CanonicalEvent],
-) -> Page<SessionSummary> {
-    let mut matching = sessions
-        .into_iter()
-        .filter(|session| after.is_none_or(|cursor| session.id.as_str() > cursor))
-        .filter(|session| family.is_none_or(|family| session.tool_family == family))
-        .take(limit + 1)
-        .collect::<Vec<_>>();
-    let has_more = matching.len() > limit;
-    matching.truncate(limit);
-    let next_cursor = has_more
-        .then(|| {
-            matching
-                .last()
-                .map(|session| encode_cursor("session", &session.id))
-        })
-        .flatten();
-    Page {
-        items: matching
-            .into_iter()
-            .map(|session| summarize_session(session, events))
-            .collect(),
-        next_cursor,
-    }
-}
-
 async fn native_session(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -409,45 +394,31 @@ async fn native_session(
         .get_native_session(&id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let events = state.storage.list_canonical_events().await?;
-    Ok(Json(summarize_session(session, &events)))
+    Ok(Json(summarize_session(&state.storage, session).await?))
 }
 
-fn summarize_session(session: StoredNativeSession, events: &[CanonicalEvent]) -> SessionSummary {
-    let session_events = events
-        .iter()
-        .filter(|event| event.native_session_id == session.id)
-        .collect::<Vec<_>>();
-    let thread_title = session_events
-        .iter()
-        .find_map(|event| {
-            ["thread_title", "title", "name"]
-                .into_iter()
-                .find_map(|key| event.payload.get(key)?.as_str())
-        })
-        .or_else(|| {
-            session_events
-                .iter()
-                .find(|event| event.kind == EventKind::UserMessage)
-                .and_then(|event| event.payload.get("text")?.as_str())
-        })
+/// Uses SQL aggregates and bounded title text instead of loading session transcripts.
+async fn summarize_session(
+    storage: &Storage,
+    session: StoredNativeSession,
+) -> Result<SessionSummary, ApiError> {
+    let stats = storage.session_statistics(&session.id).await?;
+    let thread_title = stats
+        .title
+        .as_deref()
         .map(|title| bounded_title(title, 80))
         .filter(|title| !title.is_empty())
         .unwrap_or_else(|| session.id.clone());
-    let content_bytes = session_events
-        .iter()
-        .map(|event| event.to_json().map_or(0, |json| json.len()))
-        .sum();
-    SessionSummary {
+    Ok(SessionSummary {
         id: session.id,
         tool_family: session.tool_family,
         surface: session.surface,
         started_at: session.started_at,
         ended_at: session.ended_at,
         thread_title,
-        event_count: session_events.len(),
-        content_bytes,
-    }
+        event_count: stats.event_count,
+        content_bytes: stats.content_bytes,
+    })
 }
 
 fn bounded_title(title: &str, limit: usize) -> String {
@@ -478,19 +449,30 @@ async fn events(
     let limit = page_size(query.limit)?;
     let after = decode_cursor(query.cursor.as_deref(), "event")?;
     let kind = query.kind.as_deref().map(parse_kind).transpose()?;
-    let events = sorted_events(state.storage.list_canonical_events().await?)?;
-    if let Some(cursor) = &after
-        && !events.iter().any(|event| event.event_id.as_str() == cursor)
-    {
-        return Err(ApiError::InvalidCursor);
-    }
-    Ok(Json(page_events(
-        events,
-        after.as_deref(),
-        limit,
-        query.native_session_id.as_deref(),
-        kind,
-    )))
+    let mut matching = state
+        .storage
+        .event_overviews(
+            after.as_deref(),
+            limit + 1,
+            query.native_session_id.as_deref(),
+            kind.map(kind_name),
+            i64::MAX,
+        )
+        .await?
+        .ok_or(ApiError::InvalidCursor)?;
+    let has_more = matching.len() > limit;
+    matching.truncate(limit);
+    let next_cursor = if has_more {
+        matching
+            .last()
+            .map(|event| encode_cursor("event", &event.event_id))
+    } else {
+        None
+    };
+    Ok(Json(Page {
+        items: matching.into_iter().map(EventSummary::from).collect(),
+        next_cursor,
+    }))
 }
 
 async fn event_detail(
@@ -744,10 +726,8 @@ async fn global_session(
     authorize(&state, &headers)?;
     let session = state
         .storage
-        .list_global_sessions()
+        .get_global_session(&id)
         .await?
-        .into_iter()
-        .find(|session| session.id == id)
         .ok_or(ApiError::NotFound)?;
     let members = state
         .storage
@@ -1079,62 +1059,18 @@ impl From<&CanonicalEvent> for EventSummary {
     }
 }
 
-fn page_events(
-    events: Vec<CanonicalEvent>,
-    after: Option<&str>,
-    limit: usize,
-    session_id: Option<&str>,
-    kind: Option<EventKind>,
-) -> Page<EventSummary> {
-    let start = after
-        .and_then(|id| {
-            events
-                .iter()
-                .position(|event| event.event_id.as_str() == id)
-        })
-        .map_or(0, |position| position + 1);
-    let mut matching = events
-        .into_iter()
-        .skip(start)
-        .filter(|event| session_id.is_none_or(|id| event.native_session_id == id))
-        .filter(|event| kind.is_none_or(|kind| event.kind == kind))
-        .take(limit + 1)
-        .collect::<Vec<_>>();
-    let has_more = matching.len() > limit;
-    matching.truncate(limit);
-    let next_cursor = has_more
-        .then(|| {
-            matching
-                .last()
-                .map(|event| encode_cursor("event", event.event_id.as_str()))
-        })
-        .flatten();
-    Page {
-        items: matching.iter().map(EventSummary::from).collect(),
-        next_cursor,
+impl From<sessionmesh_storage::EventOverview> for EventSummary {
+    fn from(event: sessionmesh_storage::EventOverview) -> Self {
+        Self {
+            event_id: event.event_id,
+            native_session_id: event.native_session_id,
+            sequence: event.sequence,
+            timestamp: event.timestamp,
+            kind: event.kind,
+            cwd: event.cwd,
+            branch: event.branch,
+        }
     }
-}
-
-fn sorted_events(mut events: Vec<CanonicalEvent>) -> Result<Vec<CanonicalEvent>, ApiError> {
-    let mut keys = BTreeMap::new();
-    for event in &events {
-        let timestamp = chrono::DateTime::parse_from_rfc3339(event.timestamp.as_str())
-            .map_err(|_| ApiError::Internal)?;
-        let nanos = timestamp.timestamp_nanos_opt().ok_or(ApiError::Internal)?;
-        keys.insert(
-            event.event_id.as_str().to_owned(),
-            (
-                nanos,
-                event.sequence,
-                event.provenance.source_generation.clone(),
-                event.provenance.source_offset,
-                event.provenance.ingestion_sequence,
-                event.event_id.as_str().to_owned(),
-            ),
-        );
-    }
-    events.sort_by_key(|event| keys.get(event.event_id.as_str()).cloned());
-    Ok(events)
 }
 
 async fn event_stream(
@@ -1146,22 +1082,32 @@ async fn event_stream(
         .get("last-event-id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let history = sorted_events(state.storage.list_canonical_events().await?)?;
-    if let Some(id) = &last_id
-        && !history.iter().any(|event| event.event_id.as_str() == id)
-    {
-        return Err(ApiError::InvalidCursor);
-    }
+    // Subscribe before capturing replay's watermark so concurrent imports cannot fall through a gap.
     let mut receiver = state.events.subscribe();
+    let upper = state.storage.event_watermark().await?;
+    let first = state
+        .storage
+        .event_overviews(last_id.as_deref(), 256, None, None, upper)
+        .await?
+        .ok_or(ApiError::InvalidCursor)?;
     let stream = async_stream::stream! {
-        for event in page_events(history, last_id.as_deref(), usize::MAX - 1, None, None).items {
-            yield Ok(sse_event(&event));
-        }
+        let mut page = first;
         loop {
-            match receiver.recv().await {
-                Ok(event) => yield Ok(sse_event(&event)),
-                Err(broadcast::error::RecvError::Lagged(_)) => break,
-                Err(broadcast::error::RecvError::Closed) => break,
+            let next = page.last().map(|event| event.event_id.clone());
+            let full = page.len() == 256;
+            for event in page { yield Ok(sse_event(&EventSummary::from(event))); }
+            if !full { break; }
+            match state.storage.event_overviews(next.as_deref(), 256, None, None, upper).await {
+                Ok(Some(events)) => page = events,
+                _ => return,
+            }
+        }
+        while let Ok(event) = receiver.recv().await {
+            // Ignore publications already included in the bounded replay snapshot.
+            match state.storage.event_rowid(&event.event_id).await {
+                Ok(Some(rowid)) if rowid > upper => yield Ok(sse_event(&event)),
+                Ok(_) => {},
+                Err(_) => break,
             }
         }
     };
@@ -1980,23 +1926,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_stored_event_returns_safe_internal_error() {
+    async fn corrupt_payload_does_not_block_metadata_but_detail_returns_safe_error() {
         let (_directory, state) = state().await;
-        state
-            .storage
-            .store_event(&event("session-a", 0, "2026-07-20T14:30:00Z"))
-            .await
-            .unwrap();
+        let stored = event("session-a", 0, "2026-07-20T14:30:00Z");
+        state.storage.store_event(&stored).await.unwrap();
         sqlx::query("UPDATE native_events SET canonical_json = 'secret parser failure'")
             .execute(state.storage.pool())
             .await
             .unwrap();
-        let response = router(state)
+        let app = router(state);
+        let list = app
+            .clone()
             .oneshot(request("/api/v1/events"))
             .await
             .unwrap();
-        let body = json(response).await;
-
+        assert_eq!(list.status(), StatusCode::OK);
+        assert_eq!(json(list).await["items"].as_array().unwrap().len(), 1);
+        let detail = app
+            .oneshot(request(&format!(
+                "/api/v1/events/{}",
+                stored.event_id.as_str()
+            )))
+            .await
+            .unwrap();
+        let body = json(detail).await;
         assert_eq!(body["code"], "internal_error");
         assert!(!body.to_string().contains("secret parser failure"));
     }

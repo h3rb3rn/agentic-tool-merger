@@ -40,7 +40,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         environment: &environment,
         cli: ConfigLayer::default(),
     })?;
-    let storage = Storage::open(&config.database_path.value, &config.blob_store_path.value).await?;
+    let storage = Storage::open_with_retention(
+        &config.database_path.value,
+        &config.blob_store_path.value,
+        config.conversation_only.value,
+    )
+    .await?;
+    tokio::spawn(run_maintenance(
+        storage.clone(),
+        config.maintenance_interval_secs.value,
+        config.handoffs_to_keep.value,
+    ));
     let ingest_storage = storage.clone();
     let token = provision_local_token(&config.home.value)?;
     let extractor: Option<std::sync::Arc<dyn LocalExtractor>> = config
@@ -56,7 +66,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     let token_budget =
         usize::try_from(config.token_budget.value).map_err(|_| "token budget is unsupported")?;
-    let state = ApiState::new(storage, token, Vec::new()).with_handoff(extractor, token_budget);
+    let state = ApiState::new(storage, token, Vec::new())
+        .with_handoff(extractor, token_budget)
+        .with_conversation_retention(config.conversation_only.value);
     let ingestion_state = state.clone();
     let discovery_input = CodexDiscoveryInput {
         explicit_homes: config
@@ -106,6 +118,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         axum::serve(listener, application).await?;
     }
     Ok(())
+}
+
+/// Runs bounded cleanup batches independently of ingestion, logging failures for operators.
+async fn run_maintenance(storage: Storage, interval_secs: u64, handoffs_to_keep: usize) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        match storage.maintain(handoffs_to_keep).await {
+            Ok(report) => eprintln!("SessionMesh maintenance: {report:?}"),
+            Err(error) => eprintln!("SessionMesh maintenance failed: {error}"),
+        }
+    }
 }
 
 /// Builds the TLS-terminated network ingestion server for remote
@@ -168,23 +193,31 @@ async fn run_ingestion(
         tokio::time::interval(std::time::Duration::from_millis(scan_interval_ms));
     let mut reconcile_interval =
         tokio::time::interval(std::time::Duration::from_millis(reconcile_interval_ms));
+    scan_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut reconciler = Reconciler::default();
     let mut codex_memory = ScanMemory::default();
     let mut external_memory = ScanMemory::default();
-    loop {
-        tokio::select! {
-            _ = scan_interval.tick() => {
-                scan_codex_once(&state, &discovery_input, &mut codex_memory).await;
-                let external_sources = external_sources(&profile_root, &original_profile_root);
-                let opencode_source = discover_opencode(&profile_root, &original_profile_root);
-                scan_external_once(&state, &external_sources, &mut external_memory).await;
-                scan_opencode_once(&state, opencode_source.as_ref()).await;
-            }
-            _ = reconcile_interval.tick() => {
-                let _ = reconciler.reconcile(&state, correlation_threshold).await;
+    // Independent futures keep first-import I/O from starving handoff generation.
+    let scanning = async {
+        loop {
+            scan_interval.tick().await;
+            scan_codex_once(&state, &discovery_input, &mut codex_memory).await;
+            let external_sources = external_sources(&profile_root, &original_profile_root);
+            let opencode_source = discover_opencode(&profile_root, &original_profile_root);
+            scan_external_once(&state, &external_sources, &mut external_memory).await;
+            scan_opencode_once(&state, opencode_source.as_ref()).await;
+        }
+    };
+    let reconciliation = async {
+        loop {
+            reconcile_interval.tick().await;
+            if let Err(error) = reconciler.reconcile(&state, correlation_threshold).await {
+                eprintln!("SessionMesh reconciliation failed: {error}");
             }
         }
-    }
+    };
+    tokio::join!(scanning, reconciliation);
 }
 
 /// Remembers each scanned file's size and modification time so unchanged
@@ -222,6 +255,13 @@ async fn scan_codex_once(
     memory: &mut ScanMemory,
 ) {
     let report = discover(discovery_input);
+    let present = report
+        .installations
+        .iter()
+        .flat_map(|installation| &installation.sources)
+        .map(|source| source.readable_path.clone())
+        .collect::<BTreeSet<_>>();
+    memory.stamps.retain(|path, _| present.contains(path));
     for source in report
         .installations
         .iter()
@@ -252,11 +292,25 @@ async fn scan_codex_once(
             fallback_session_id,
             imported_at,
         };
-        if let Ok(prepared) = ingest_file(state.storage(), &input).await {
+        let prepared = match ingest_file(state.storage(), &input).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                eprintln!("SessionMesh Codex ingestion failed: {error}");
+                continue;
+            }
+        };
+        {
             for event in &prepared.batch.events {
                 state.publish(event);
             }
-            if let Some(stamp) = stamp {
+            if let Some(stamp) = stamp.filter(|stamp| {
+                prepared
+                    .batch
+                    .cursor
+                    .byte_offset
+                    .saturating_add(prepared.batch.cursor.partial_line.len() as u64)
+                    >= stamp.0
+            }) {
                 memory.remember(&source.readable_path, stamp);
             }
         }
@@ -285,8 +339,12 @@ async fn scan_opencode_once(state: &ApiState, source: Option<&OpenCodeSource>) {
     };
     let imported_at =
         chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339();
-    let Ok(import) = ingest_opencode(state.storage(), source, &imported_at).await else {
-        return;
+    let import = match ingest_opencode(state.storage(), source, &imported_at).await {
+        Ok(import) => import,
+        Err(error) => {
+            eprintln!("SessionMesh OpenCode ingestion failed: {error}");
+            return;
+        }
     };
     for event in &import.events {
         state.publish(event);
@@ -294,6 +352,11 @@ async fn scan_opencode_once(state: &ApiState, source: Option<&OpenCodeSource>) {
 }
 
 async fn scan_external_once(state: &ApiState, sources: &[ExternalSource], memory: &mut ScanMemory) {
+    let present = sources
+        .iter()
+        .map(|source| &source.path)
+        .collect::<BTreeSet<_>>();
+    memory.stamps.retain(|path, _| present.contains(path));
     for source in sources {
         let stamp = ScanMemory::stamp(&source.path);
         if stamp
@@ -304,11 +367,18 @@ async fn scan_external_once(state: &ApiState, sources: &[ExternalSource], memory
         }
         let imported_at =
             chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339();
-        if let Ok(import) = ingest_external(state.storage(), source, &imported_at).await {
+        let import = match ingest_external(state.storage(), source, &imported_at).await {
+            Ok(import) => import,
+            Err(error) => {
+                eprintln!("SessionMesh external ingestion failed: {error}");
+                continue;
+            }
+        };
+        {
             for event in &import.events {
                 state.publish(event);
             }
-            if let Some(stamp) = stamp {
+            if let Some(stamp) = stamp.filter(|_| import.caught_up) {
                 memory.remember(&source.path, stamp);
             }
         }
@@ -346,9 +416,24 @@ struct Reconciler {
     /// Compact per-session correlation inputs; event payloads are not kept.
     summaries: BTreeMap<String, SessionSummary>,
     bootstrapped: bool,
+    context_revision: i64,
 }
 
 impl Reconciler {
+    /// Keeps steady-state and bootstrap correlation memory independent of transcript age.
+    fn trim_cache(&mut self) {
+        while self.summaries.len() > 2048 {
+            let oldest = self
+                .summaries
+                .values()
+                .min_by_key(|summary| (summary.ended_at, &summary.id))
+                .map(|summary| summary.id.clone());
+            if let Some(id) = oldest {
+                self.summaries.remove(&id);
+            }
+        }
+    }
+
     /// Correlates changed sessions and refreshes the affected handoffs.
     ///
     /// Returns the global sessions whose handoff was regenerated, which is
@@ -364,6 +449,10 @@ impl Reconciler {
         correlation_threshold: f64,
     ) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
         let storage = state.storage();
+        let revision = storage.context_revision().await?;
+        if revision != self.context_revision {
+            self.bootstrapped = false;
+        }
         let (changed_ids, next_watermark) = storage
             .native_sessions_changed_since(self.watermark)
             .await?;
@@ -371,9 +460,12 @@ impl Reconciler {
             return Ok(Vec::new());
         }
         let changed = changed_ids.iter().cloned().collect::<BTreeSet<_>>();
+        let mut pending = Vec::with_capacity(changed_ids.len());
         for id in &changed_ids {
             if let Some(summary) = load_session_summary(storage, id).await? {
+                pending.push((summary.started_at, id.clone()));
                 self.summaries.insert(id.clone(), summary);
+                self.trim_cache();
             }
         }
 
@@ -394,13 +486,16 @@ impl Reconciler {
         )
         .await?;
 
-        let mut pending = changed_ids
-            .iter()
-            .filter_map(|id| self.summaries.get(id))
-            .collect::<Vec<_>>();
-        pending.sort_by_key(|summary| summary.started_at);
+        pending.sort();
         let mut touched = BTreeSet::new();
-        for summary in pending {
+        for (_, id) in pending {
+            let summary = if let Some(summary) = self.summaries.get(&id) {
+                summary.clone()
+            } else if let Some(summary) = load_session_summary(storage, &id).await? {
+                summary
+            } else {
+                continue;
+            };
             if let Some(global_id) = member_global.get(&summary.id) {
                 touched.insert(global_id.clone());
                 continue;
@@ -410,7 +505,7 @@ impl Reconciler {
                 .filter_map(|member| {
                     let other = self.summaries.get(&member.native_session_id)?;
                     (summary.tool_family != other.tool_family).then(|| {
-                        let evidence = correlation_evidence(summary, other);
+                        let evidence = correlation_evidence(&summary, other);
                         (member.global_session_id.clone(), other, evidence)
                     })
                 })
@@ -498,12 +593,21 @@ impl Reconciler {
         }
         let mut refreshed = Vec::with_capacity(touched.len());
         for global_id in touched {
-            if state.refresh_global_handoff(&global_id).await.is_ok() {
-                refreshed.push(global_id);
+            match state.refresh_global_handoff(&global_id).await {
+                Ok(_) => refreshed.push(global_id),
+                Err(sessionmesh_api::HandoffRefreshError::Handoff(
+                    sessionmesh_handoff::HandoffError::MissingProvenance,
+                )) => {
+                    // Metadata-only sessions await usable facts; do not block other sessions.
+                    eprintln!("SessionMesh handoff awaiting conversation evidence: {global_id}");
+                }
+                Err(error) => return Err(error.into()),
             }
         }
+        self.trim_cache();
         self.watermark = next_watermark;
         self.bootstrapped = true;
+        self.context_revision = revision;
         Ok(refreshed)
     }
 }
@@ -565,16 +669,22 @@ async fn load_session_summary(
         .get_native_session(id)
         .await?
         .and_then(|session| session.origin_collector_id);
-    let mut events = storage
-        .list_canonical_events_for_sessions(&[id.to_owned()])
-        .await?;
-    events.sort_by(|left, right| {
-        left.timestamp
-            .as_str()
-            .cmp(right.timestamp.as_str())
-            .then(left.sequence.cmp(&right.sequence))
-    });
-    Ok(summarize_session(id, &events, origin_collector_id))
+    let events = storage.recent_context(&[id.to_owned()], 256).await?;
+    let mut summary = summarize_session(id, &events, origin_collector_id);
+    if let Some(summary) = summary.as_mut() {
+        // The active context window must not replace the original thread objective.
+        if let Some(title) = storage.session_statistics(id).await?.title {
+            summary.objective = compact_objective(&title);
+        }
+        if let Some(first) = storage
+            .event_overviews(None, 1, Some(id), None, i64::MAX)
+            .await?
+            .and_then(|mut events| events.pop())
+        {
+            summary.started_at = chrono::DateTime::parse_from_rfc3339(&first.timestamp)?;
+        }
+    }
+    Ok(summary)
 }
 
 /// Reduces ordered session events to compact correlation inputs.
@@ -617,6 +727,7 @@ fn summarize_session(
                 .and_then(serde_json::Value::as_str)
         })
         .flat_map(content_terms)
+        .take(512)
         .collect();
     Some(SessionSummary {
         id: id.to_owned(),
@@ -697,7 +808,7 @@ fn correlation_evidence(left: &SessionSummary, right: &SessionSummary) -> Correl
 
 fn content_terms(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split(|character: char| !character.is_alphanumeric())
-        .map(str::to_lowercase)
+        .map(|term| term.chars().take(64).collect::<String>().to_lowercase())
         .filter(|term| term.len() >= 4)
 }
 
@@ -1154,6 +1265,90 @@ mod tests {
             .find(|member| member.native_session_id == native)
             .unwrap()
             .global_session_id
+    }
+
+    #[tokio::test]
+    async fn metadata_only_sessions_do_not_block_conversation_handoffs_or_idle_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(
+            directory.path().join("state.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .unwrap();
+        let state = ApiState::new(storage.clone(), "test", Vec::new());
+        let mut json = serde_json::to_value(user_event("metadata-only", 1, "")).unwrap();
+        json["kind"] = "session_start".into();
+        json.as_object_mut().unwrap().remove("schema_version");
+        json.as_object_mut().unwrap().remove("event_id");
+        let metadata = sessionmesh_core::event::CanonicalEvent::from_draft(
+            serde_json::from_value(json).unwrap(),
+        )
+        .unwrap();
+        commit_events(&storage, "metadata-only", vec![metadata]).await;
+        commit_events(
+            &storage,
+            "conversation",
+            vec![user_event("conversation", 1, "Preserve real work")],
+        )
+        .await;
+        let mut reconciler = Reconciler::default();
+        let refreshed = reconciler.reconcile(&state, 0.8).await.unwrap();
+        assert_eq!(refreshed.len(), 1);
+        assert!(reconciler.reconcile(&state, 0.8).await.unwrap().is_empty());
+        assert!(
+            storage
+                .latest_handoff(&global_of(&storage, "metadata-only").await)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .latest_handoff(&global_of(&storage, "conversation").await)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_rebuilds_context_without_requiring_a_new_message() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(
+            directory.path().join("state.db"),
+            directory.path().join("blobs"),
+        )
+        .await
+        .unwrap();
+        let state = ApiState::new(storage.clone(), "test", Vec::new());
+        let mut tool = user_event("s", 2, "old tool body");
+        tool.kind = sessionmesh_core::event::EventKind::ToolResult;
+        // Rebuild a stable identity after selecting a different canonical kind.
+        let mut json = serde_json::to_value(&tool).unwrap();
+        json.as_object_mut().unwrap().remove("schema_version");
+        json.as_object_mut().unwrap().remove("event_id");
+        let tool = sessionmesh_core::event::CanonicalEvent::from_draft(
+            serde_json::from_value(json).unwrap(),
+        )
+        .unwrap();
+        commit_events(
+            &storage,
+            "s",
+            vec![user_event("s", 1, "Preserve objective"), tool],
+        )
+        .await;
+        let mut reconciler = Reconciler::default();
+        reconciler.reconcile(&state, 0.8).await.unwrap();
+        let global = global_of(&storage, "s").await;
+        storage.set_conversation_retention(true).await.unwrap();
+        storage.maintain(1).await.unwrap();
+        assert!(storage.latest_handoff(&global).await.unwrap().is_none());
+        assert_eq!(
+            reconciler.reconcile(&state, 0.8).await.unwrap(),
+            vec![global.clone()]
+        );
+        assert!(storage.latest_handoff(&global).await.unwrap().is_some());
     }
 
     #[tokio::test]

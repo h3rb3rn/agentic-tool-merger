@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
 getrandom.workspace = true
 sessionmesh-core = { path = "../sessionmesh-core" }
 sha2.workspace = true

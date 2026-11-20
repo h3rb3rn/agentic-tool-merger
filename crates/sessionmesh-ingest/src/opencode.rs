@@ -103,7 +103,9 @@ pub async fn prepare_opencode(
     let metadata = tokio::fs::metadata(&source.path).await?;
     let fingerprint = database_fingerprint(&source.path, &metadata);
     let source_id = opencode_source_id(source);
-    if prior_cursor.is_some_and(|cursor| cursor.source_generation == fingerprint) {
+    if prior_cursor.is_some_and(|cursor| {
+        cursor.source_generation == fingerprint && cursor.partial_line.is_empty()
+    }) {
         return Ok(None);
     }
 
@@ -113,7 +115,8 @@ pub async fn prepare_opencode(
         // The agent-home bind is intentionally read-only. Immutable mode
         // prevents SQLite from attempting WAL/SHM lock writes on that mount.
         .immutable(true)
-        .create_if_missing(false);
+        .create_if_missing(false)
+        .pragma("cache_size", "-8192");
     let mut connection = SqliteConnection::connect_with(&options).await?;
     // Sessions are the unit of replay: a session with any part updated at or
     // after the previous high-water mark is reread whole, because event
@@ -127,37 +130,69 @@ pub async fn prepare_opencode(
         .map(|cursor| i64::try_from(cursor.byte_offset).unwrap_or(0))
         .filter(|mark| *mark <= newest_update)
         .unwrap_or(0);
-    let rows = sqlx::query(
-        "SELECT p.id AS part_id, p.session_id, p.time_created,
+    // Resume a bounded page even when the live database fingerprint changed.
+    // The next complete pass replays sessions updated after this pass's captured watermark.
+    let continuation: Option<(String, i64, String, i64)> = prior_cursor
+        .filter(|cursor| {
+            !cursor.partial_line.is_empty()
+                && cursor.byte_offset <= u64::try_from(newest_update).unwrap_or(0)
+        })
+        .map(|cursor| serde_json::from_slice(&cursor.partial_line))
+        .transpose()?;
+    let (last_session, last_time, last_part, target_update) =
+        continuation.unwrap_or_else(|| (String::new(), i64::MIN, String::new(), newest_update));
+    let mut rows = sqlx::query(
+        "SELECT * FROM (
+         SELECT p.id AS part_id, p.session_id, p.time_created,
                 s.directory, s.title AS thread_title,
-                m.data AS message_data, p.data AS part_data
+                length(m.data)+length(p.data) AS payload_bytes,
+                ROW_NUMBER() OVER (PARTITION BY p.session_id ORDER BY p.time_created,p.id)-1 AS native_sequence
          FROM part p
-         JOIN message m ON m.id = p.message_id AND m.session_id = p.session_id
-         JOIN session s ON s.id = p.session_id
-         WHERE json_extract(p.data, '$.type') = 'text'
-           AND json_type(p.data, '$.text') = 'text'
-           AND p.session_id IN (
-               SELECT DISTINCT session_id FROM part WHERE time_updated >= ?
-           )
-         ORDER BY p.session_id, p.time_created, p.id",
-    )
-    .bind(watermark)
-    .fetch_all(&mut connection)
-    .await?;
+         JOIN message m ON m.id=p.message_id AND m.session_id=p.session_id
+         JOIN session s ON s.id=p.session_id
+         WHERE json_extract(p.data,'$.type')='text'
+           AND json_type(p.data,'$.text')='text' AND json_extract(p.data,'$.text')!=''
+           AND p.session_id IN (SELECT DISTINCT session_id FROM part WHERE time_updated >= ?)
+         ) WHERE (?='' OR (session_id,time_created,part_id)>(?,?,?))
+         ORDER BY session_id,time_created,part_id LIMIT 128",
+    ).bind(watermark).bind(&last_session).bind(&last_session).bind(last_time).bind(&last_part)
+        .fetch_all(&mut connection).await?;
+    let metadata_full = rows.len() == 128;
+    let mut payload_rows = Vec::new();
+    let mut payload_bytes = 0_i64;
+    for row in &rows {
+        let size: i64 = row.try_get("payload_bytes")?;
+        if !payload_rows.is_empty() && payload_bytes.saturating_add(size) > 4 * 1024 * 1024 {
+            break;
+        }
+        payload_rows.push(sqlx::query("SELECT m.data AS message_data,p.data AS part_data FROM part p JOIN message m ON m.id=p.message_id AND m.session_id=p.session_id WHERE p.id=?")
+            .bind(row.try_get::<String,_>("part_id")?).fetch_one(&mut connection).await?);
+        payload_bytes = payload_bytes.saturating_add(size);
+    }
+    let has_more = metadata_full || payload_rows.len() < rows.len();
+    rows.truncate(payload_rows.len());
+    let continuation = match rows.last() {
+        Some(last) if has_more => serde_json::to_vec(&(
+            last.try_get::<String, _>("session_id")?,
+            last.try_get::<i64, _>("time_created")?,
+            last.try_get::<String, _>("part_id")?,
+            target_update,
+        ))?,
+        _ => Vec::new(),
+    };
     connection.close().await?;
 
     let generation = stable_generation(&source.path);
-    let mut sequences = BTreeMap::<String, u64>::new();
     let mut events = Vec::with_capacity(rows.len());
     let mut raw_objects = Vec::with_capacity(rows.len());
-    for row in rows {
+    for (row, payload_row) in rows.into_iter().zip(payload_rows) {
         let part_id: String = row.try_get("part_id")?;
         let native_id: String = row.try_get("session_id")?;
         let created: i64 = row.try_get("time_created")?;
         let directory: String = row.try_get("directory")?;
         let thread_title: String = row.try_get("thread_title")?;
-        let message_data: String = row.try_get("message_data")?;
-        let part_data: String = row.try_get("part_data")?;
+        let message_data: String = payload_row.try_get("message_data")?;
+        let part_data: String = payload_row.try_get("part_data")?;
         let message: serde_json::Value = serde_json::from_str(&message_data)?;
         let part: serde_json::Value = serde_json::from_str(&part_data)?;
         let role = message
@@ -177,7 +212,7 @@ pub async fn prepare_opencode(
             continue;
         }
         let session_id = format!("opencode:{native_id}");
-        let sequence = sequences.entry(session_id.clone()).or_default();
+        let sequence = u64::try_from(row.try_get::<i64, _>("native_sequence")?).unwrap_or(0);
         let timestamp = timestamp(created, imported_at);
         let raw = serde_json::to_vec(&serde_json::json!({
             "part_id": part_id,
@@ -196,7 +231,7 @@ pub async fn prepare_opencode(
                 profile: "default".to_owned(),
             },
             native_session_id: session_id,
-            sequence: *sequence,
+            sequence,
             timestamp: EventTimestamp::parse(timestamp.clone())?,
             timestamp_precision: TimestampPrecision::Millisecond,
             kind,
@@ -222,7 +257,7 @@ pub async fn prepare_opencode(
                 source_offset: offset,
                 source_generation: generation.clone(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_owned(),
-                ingestion_sequence: *sequence,
+                ingestion_sequence: sequence,
                 ordering_confidence: Some(0.95),
             },
         })?;
@@ -240,7 +275,6 @@ pub async fn prepare_opencode(
             imported_at: imported_at.to_owned(),
         });
         events.push(event);
-        *sequence = sequence.saturating_add(1);
     }
     let next_sequence = u64::try_from(events.len()).unwrap_or(u64::MAX);
     Ok(Some(IngestionBatch {
@@ -250,9 +284,14 @@ pub async fn prepare_opencode(
             source_id,
             source_generation: fingerprint,
             // High-water mark of `part.time_updated`, not a file offset.
-            byte_offset: u64::try_from(newest_update).unwrap_or(0),
+            byte_offset: u64::try_from(if continuation.is_empty() {
+                target_update
+            } else {
+                watermark
+            })
+            .unwrap_or(0),
             next_sequence,
-            partial_line: Vec::new(),
+            partial_line: continuation,
             updated_at: imported_at.to_owned(),
         },
     }))
@@ -363,6 +402,64 @@ error_from!(StorageError, Storage);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn large_import_resumes_bounded_pages_without_changing_event_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("opencode.db");
+        let mut connection = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        for sql in [
+            "CREATE TABLE session (id TEXT PRIMARY KEY,directory TEXT,title TEXT)",
+            "CREATE TABLE message (id TEXT PRIMARY KEY,session_id TEXT,data TEXT)",
+            "CREATE TABLE part (id TEXT PRIMARY KEY,message_id TEXT,session_id TEXT,time_created INTEGER,time_updated INTEGER,data TEXT)",
+            "INSERT INTO session VALUES ('s','/repo','Thread')",
+            "INSERT INTO message VALUES ('m','s','{\"role\":\"assistant\"}')",
+        ] {
+            sqlx::query(sql).execute(&mut connection).await.unwrap();
+        }
+        for i in 0..300 {
+            sqlx::query("INSERT INTO part VALUES (?, 'm', 's', ?, ?, '{\"type\":\"text\",\"text\":\"Keep AI output\"}')").bind(format!("p{i:04}")).bind(i+1).bind(i+1).execute(&mut connection).await.unwrap();
+        }
+        connection.close().await.unwrap();
+        let source = OpenCodeSource {
+            path: database,
+            original_path: "/original/opencode.db".into(),
+        };
+        let first = prepare_opencode(&source, "2026-07-22T00:00:00Z", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.events.len(), 128);
+        assert!(!first.cursor.partial_line.is_empty());
+        let second = prepare_opencode(&source, "2026-07-22T00:00:00Z", Some(&first.cursor))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.events.first().unwrap().sequence, 128);
+        let third = prepare_opencode(&source, "2026-07-22T00:00:00Z", Some(&second.cursor))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(third.events.len(), 44);
+        assert!(third.cursor.partial_line.is_empty());
+        assert!(
+            prepare_opencode(&source, "2026-07-22T00:00:00Z", Some(&third.cursor))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let replay = prepare_opencode(&source, "2026-07-22T00:00:00Z", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.events, replay.events);
+    }
 
     #[test]
     fn derived_row_offsets_always_fit_sqlite_integer() {

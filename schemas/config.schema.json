@@ -5,19 +5,34 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "home": { "$ref": "#/$defs/path" },
+    "home": {
+      "$ref": "#/$defs/path"
+    },
     "bind_address": {
       "type": "string",
-      "anyOf": [{ "format": "ipv4" }, { "format": "ipv6" }]
+      "anyOf": [
+        {
+          "format": "ipv4"
+        },
+        {
+          "format": "ipv6"
+        }
+      ]
     },
     "port": {
       "type": "integer",
       "minimum": 1,
       "maximum": 65535
     },
-    "allow_network": { "type": "boolean" },
-    "database_path": { "$ref": "#/$defs/path" },
-    "blob_store_path": { "$ref": "#/$defs/path" },
+    "allow_network": {
+      "type": "boolean"
+    },
+    "database_path": {
+      "$ref": "#/$defs/path"
+    },
+    "blob_store_path": {
+      "$ref": "#/$defs/path"
+    },
     "watch_debounce_ms": {
       "type": "integer",
       "minimum": 0,
@@ -28,7 +43,9 @@
       "minimum": 1,
       "maximum": 600000
     },
-    "redaction_enabled": { "type": "boolean" },
+    "redaction_enabled": {
+      "type": "boolean"
+    },
     "embedding_endpoint": {
       "type": "string",
       "format": "uri",
@@ -39,8 +56,14 @@
       "format": "uri",
       "pattern": "^https?://"
     },
-    "model": { "type": "string", "minLength": 1 },
-    "token_budget": { "type": "integer", "minimum": 1 },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "token_budget": {
+      "type": "integer",
+      "minimum": 1
+    },
     "correlation_threshold": {
       "type": "number",
       "minimum": 0,
@@ -53,26 +76,65 @@
         "additionalProperties": false,
         "required": ["readable_path", "original_path"],
         "properties": {
-          "readable_path": { "$ref": "#/$defs/path" },
-          "original_path": { "$ref": "#/$defs/path" }
+          "readable_path": {
+            "$ref": "#/$defs/path"
+          },
+          "original_path": {
+            "$ref": "#/$defs/path"
+          }
         }
       }
     },
-    "network_ingestion_enabled": { "type": "boolean" },
+    "network_ingestion_enabled": {
+      "type": "boolean"
+    },
     "ingest_bind_address": {
       "type": "string",
-      "anyOf": [{ "format": "ipv4" }, { "format": "ipv6" }]
+      "anyOf": [
+        {
+          "format": "ipv4"
+        },
+        {
+          "format": "ipv6"
+        }
+      ]
     },
     "ingest_port": {
       "type": "integer",
       "minimum": 1,
       "maximum": 65535
     },
-    "ingest_tls_cert_path": { "$ref": "#/$defs/path" },
-    "ingest_tls_key_path": { "$ref": "#/$defs/path" },
-    "ingest_max_batch_bytes": { "type": "integer", "minimum": 1 },
-    "ingest_max_events_per_batch": { "type": "integer", "minimum": 1 },
-    "ingest_rate_limit_per_minute": { "type": "integer", "minimum": 0 }
+    "ingest_tls_cert_path": {
+      "$ref": "#/$defs/path"
+    },
+    "ingest_tls_key_path": {
+      "$ref": "#/$defs/path"
+    },
+    "ingest_max_batch_bytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ingest_max_events_per_batch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ingest_rate_limit_per_minute": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "conversation_only": {
+      "type": "boolean"
+    },
+    "maintenance_interval_secs": {
+      "type": "integer",
+      "minimum": 60,
+      "maximum": 86400
+    },
+    "handoffs_to_keep": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    }
   },
   "$defs": {
     "path": {

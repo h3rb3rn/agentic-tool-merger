@@ -45,10 +45,10 @@ authenticating immediately.
 
 ## Endpoints
 
-| Method | Path                     | Purpose                                          |
-| ------ | ------------------------ | ------------------------------------------------- |
-| GET    | `/api/v1/ingest/cursor`  | Resolve the caller's last committed cursor for one source |
-| POST   | `/api/v1/ingest/batch`   | Commit raw objects, canonical events, and the resulting cursor |
+| Method | Path                    | Purpose                                                        |
+| ------ | ----------------------- | -------------------------------------------------------------- |
+| GET    | `/api/v1/ingest/cursor` | Resolve the caller's last committed cursor for one source      |
+| POST   | `/api/v1/ingest/batch`  | Commit raw objects, canonical events, and the resulting cursor |
 
 Both endpoints require the `source_id` query parameter (`GET`) or body field
 (`POST`) — a collector-chosen identity for one native source, e.g.
@@ -122,19 +122,22 @@ On success:
 
 ## Limits and errors
 
-| Condition                          | Status | `code`                        |
-| ----------------------------------- | ------ | ------------------------------ |
-| Missing or invalid/revoked token   | 401    | `unauthorized`                 |
-| Over the per-collector rate limit  | 429    | `rate_limited`                 |
-| Batch exceeds `ingest_max_batch_bytes` | 413 | `payload_too_large`            |
-| Batch exceeds `ingest_max_events_per_batch` | 413 | `too_many_events`         |
-| Malformed request body             | 400    | `malformed_request`            |
-| An event fails ID re-verification  | 400    | `invalid_event`                |
-| A raw object's declared `id` does not match its content | 400 | `raw_object_identity_mismatch` |
-| Commit failed internally           | 500    | `internal_error` (no internal detail is returned to the client) |
+| Condition                                               | Status | `code`                                                          |
+| ------------------------------------------------------- | ------ | --------------------------------------------------------------- |
+| Missing or invalid/revoked token                        | 401    | `unauthorized`                                                  |
+| Over the per-collector rate limit                       | 429    | `rate_limited`                                                  |
+| Batch exceeds `ingest_max_batch_bytes`                  | 413    | `payload_too_large`                                             |
+| Batch exceeds `ingest_max_events_per_batch`             | 413    | `too_many_events`                                               |
+| Malformed request body                                  | 400    | `malformed_request`                                             |
+| An event fails ID re-verification                       | 400    | `invalid_event`                                                 |
+| A raw object's declared `id` does not match its content | 400    | `raw_object_identity_mismatch`                                  |
+| Commit failed internally                                | 500    | `internal_error` (no internal detail is returned to the client) |
 
 ```json
-{ "code": "rate_limited", "message": "collector exceeded its request rate limit" }
+{
+  "code": "rate_limited",
+  "message": "collector exceeded its request rate limit"
+}
 ```
 
 Every request — accepted or rejected, including authentication failures —
@@ -142,3 +145,14 @@ is written to an ingestion audit log, attributing it to the resolved
 collector when authentication succeeded, and to no collector when it did
 not. See [Storage Architecture](../architecture/storage.md) for the
 underlying tables.
+
+## Shared retention policy
+
+Accepted batches still validate canonical identities and raw provenance before
+commit. The database's conversation policy applies to remote imports as well:
+separate tool/code bodies can be accepted for cursor progress without remaining
+in persistent storage. Wire response counts describe accepted batch inputs,
+not a guarantee that every input bypassed the configured retention policy.
+Prompts and AI replies remain durable. Upgrade collectors for bounded import
+batches and corrected Claude tool-only-envelope classification. See
+[resource management](../operations/resource-management.md).

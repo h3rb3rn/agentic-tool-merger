@@ -20,12 +20,47 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("collector") => run_collector(args).await,
+        Some("maintenance") => run_maintenance(args).await,
         Some("--help" | "-h") | None => {
             print_usage();
             Ok(())
         }
         Some(other) => Err(format!("unknown command '{other}'\n\n{}", usage_text()).into()),
     }
+}
+
+/// Reports storage use, or applies the configured conversation/derived-context policy.
+async fn run_maintenance(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let args = args.collect::<Vec<_>>();
+    if args
+        .iter()
+        .any(|arg| !matches!(arg.as_str(), "--apply" | "--vacuum"))
+    {
+        return Err("usage: sessionmesh maintenance [--apply [--vacuum]]".into());
+    }
+    let apply = args.iter().any(|arg| arg == "--apply");
+    let vacuum = args.iter().any(|arg| arg == "--vacuum");
+    if vacuum && !apply {
+        return Err("--vacuum requires --apply".into());
+    }
+    let storage = open_storage().await?;
+    println!("{}", storage.resource_summary().await?);
+    if apply {
+        let config = configuration()?;
+        println!(
+            "Maintenance: {:?}",
+            storage.maintain(config.handoffs_to_keep.value).await?
+        );
+        if vacuum {
+            storage.compact_database().await?;
+        }
+        println!("{}", storage.resource_summary().await?);
+    } else {
+        println!(
+            "Inspection only; use --apply to remove eligible tool/code events and obsolete derived context."
+        );
+    }
+    Ok(())
 }
 
 async fn run_collector(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
@@ -54,7 +89,7 @@ async fn run_collector(mut args: impl Iterator<Item = String>) -> Result<(), Box
 
 /// Opens the same database the daemon uses, resolved the same way
 /// (`SESSIONMESH_HOME`, the user config file, then environment overrides).
-async fn open_storage() -> Result<Storage, Box<dyn Error>> {
+fn configuration() -> Result<sessionmesh_core::configuration::AppConfig, Box<dyn Error>> {
     let environment = env::vars().collect::<BTreeMap<_, _>>();
     let user_home = environment
         .get("HOME")
@@ -68,7 +103,19 @@ async fn open_storage() -> Result<Storage, Box<dyn Error>> {
         environment: &environment,
         cli: ConfigLayer::default(),
     })?;
-    Ok(Storage::open(&config.database_path.value, &config.blob_store_path.value).await?)
+    Ok(config)
+}
+
+/// Opens the configured database and shares its retention policy with all writers.
+async fn open_storage() -> Result<Storage, Box<dyn Error>> {
+    let config = configuration()?;
+    let storage = Storage::open_with_retention(
+        &config.database_path.value,
+        &config.blob_store_path.value,
+        config.conversation_only.value,
+    )
+    .await?;
+    Ok(storage)
 }
 
 async fn issue(storage: &Storage, label: &str) -> Result<(), Box<dyn Error>> {
@@ -124,7 +171,8 @@ fn usage_text() -> &'static str {
     "Usage:\n  \
      sessionmesh collector issue <label>     Issue a new collector token (shown once)\n  \
      sessionmesh collector list              List registered collectors\n  \
-     sessionmesh collector revoke <id>       Revoke a collector's token"
+     sessionmesh collector revoke <id>       Revoke a collector's token\n  \
+     sessionmesh maintenance [--apply [--vacuum]]  Inspect or reclaim derived/tool storage"
 }
 
 fn print_usage() {

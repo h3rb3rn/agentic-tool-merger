@@ -88,6 +88,12 @@ pub struct AppConfig {
     /// with total session history, while discovery and incremental ingest
     /// stay cheap and can run far more often.
     pub reconcile_interval_ms: Resolved<u64>,
+    /// Persist prompts and AI replies, without separate tool/code bodies.
+    pub conversation_only: Resolved<bool>,
+    /// Cleanup period in seconds (startup also runs cleanup).
+    pub maintenance_interval_secs: Resolved<u64>,
+    /// Latest derived handoffs retained per global session.
+    pub handoffs_to_keep: Resolved<usize>,
     /// Whether secret redaction is enabled before derived processing.
     pub redaction_enabled: Resolved<bool>,
     /// Optional OpenAI-compatible embedding endpoint.
@@ -159,6 +165,12 @@ pub struct ConfigLayer {
     pub watch_debounce_ms: Option<u64>,
     /// Reconciliation interval in milliseconds.
     pub reconcile_interval_ms: Option<u64>,
+    /// Select conversation-oriented retention for all writers.
+    pub conversation_only: Option<bool>,
+    /// Cleanup period in seconds.
+    pub maintenance_interval_secs: Option<u64>,
+    /// Derived handoffs retained per global session.
+    pub handoffs_to_keep: Option<usize>,
     /// Secret-redaction toggle.
     pub redaction_enabled: Option<bool>,
     /// Embedding endpoint URL.
@@ -296,6 +308,9 @@ struct RawConfig {
     blob_store_path: Resolved<Option<PathBuf>>,
     watch_debounce_ms: Resolved<u64>,
     reconcile_interval_ms: Resolved<u64>,
+    conversation_only: Resolved<bool>,
+    maintenance_interval_secs: Resolved<u64>,
+    handoffs_to_keep: Resolved<usize>,
     redaction_enabled: Resolved<bool>,
     embedding_endpoint: Resolved<Option<String>>,
     llm_endpoint: Resolved<Option<String>>,
@@ -327,6 +342,9 @@ impl RawConfig {
                 DEFAULT_RECONCILE_INTERVAL_MS,
                 ConfigSource::Default,
             ),
+            conversation_only: Resolved::new(true, ConfigSource::Default),
+            maintenance_interval_secs: Resolved::new(3600, ConfigSource::Default),
+            handoffs_to_keep: Resolved::new(1, ConfigSource::Default),
             redaction_enabled: Resolved::new(true, ConfigSource::Default),
             embedding_endpoint: Resolved::new(None, ConfigSource::Default),
             llm_endpoint: Resolved::new(None, ConfigSource::Default),
@@ -377,6 +395,12 @@ impl RawConfig {
             .replace(layer.watch_debounce_ms, source);
         self.reconcile_interval_ms
             .replace(layer.reconcile_interval_ms, source);
+        self.conversation_only
+            .replace(layer.conversation_only, source);
+        self.maintenance_interval_secs
+            .replace(layer.maintenance_interval_secs, source);
+        self.handoffs_to_keep
+            .replace(layer.handoffs_to_keep, source);
         self.redaction_enabled
             .replace(layer.redaction_enabled, source);
         self.embedding_endpoint
@@ -414,6 +438,20 @@ impl RawConfig {
         user_home: &Path,
         environment: &BTreeMap<String, String>,
     ) -> Result<AppConfig, ConfigError> {
+        if !(60..=86400).contains(&self.maintenance_interval_secs.value) {
+            return Err(ConfigError::new(
+                "maintenance_interval_secs",
+                self.maintenance_interval_secs.source,
+                "must be between 60 and 86400",
+            ));
+        }
+        if !(1..=100).contains(&self.handoffs_to_keep.value) {
+            return Err(ConfigError::new(
+                "handoffs_to_keep",
+                self.handoffs_to_keep.source,
+                "must be between 1 and 100",
+            ));
+        }
         let home = resolve_path(self.home, "home", user_home, environment)?;
         let database_path = resolve_optional_path(
             self.database_path,
@@ -548,6 +586,9 @@ impl RawConfig {
             blob_store_path,
             watch_debounce_ms: self.watch_debounce_ms,
             reconcile_interval_ms: self.reconcile_interval_ms,
+            conversation_only: self.conversation_only,
+            maintenance_interval_secs: self.maintenance_interval_secs,
+            handoffs_to_keep: self.handoffs_to_keep,
             redaction_enabled: self.redaction_enabled,
             embedding_endpoint,
             llm_endpoint,
@@ -580,6 +621,12 @@ fn environment_layer(environment: &BTreeMap<String, String>) -> Result<ConfigLay
             .get("SESSIONMESH_BLOB_STORE_PATH")
             .map(PathBuf::from),
         watch_debounce_ms: parse_environment(environment, "SESSIONMESH_WATCH_DEBOUNCE_MS")?,
+        conversation_only: parse_environment(environment, "SESSIONMESH_CONVERSATION_ONLY")?,
+        maintenance_interval_secs: parse_environment(
+            environment,
+            "SESSIONMESH_MAINTENANCE_INTERVAL_SECS",
+        )?,
+        handoffs_to_keep: parse_environment(environment, "SESSIONMESH_HANDOFFS_TO_KEEP")?,
         reconcile_interval_ms: parse_environment(environment, "SESSIONMESH_RECONCILE_INTERVAL_MS")?,
         redaction_enabled: parse_environment(environment, "SESSIONMESH_REDACTION_ENABLED")?,
         embedding_endpoint: environment.get("SESSIONMESH_EMBEDDING_ENDPOINT").cloned(),
@@ -841,6 +888,23 @@ mod tests {
             environment,
             cli,
         }
+    }
+
+    #[test]
+    fn resource_policy_is_layered_and_rejects_unbounded_cleanup_settings() {
+        let mut environment = BTreeMap::new();
+        let home = Path::new("/isolated/home");
+        let defaults = resolve(inputs(home, None, &environment, ConfigLayer::default())).unwrap();
+        assert!(defaults.conversation_only.value);
+        assert_eq!(defaults.handoffs_to_keep.value, 1);
+        environment.insert("SESSIONMESH_CONVERSATION_ONLY".into(), "false".into());
+        let configured = resolve(inputs(home, None, &environment, ConfigLayer::default())).unwrap();
+        assert!(!configured.conversation_only.value);
+        environment.insert("SESSIONMESH_MAINTENANCE_INTERVAL_SECS".into(), "0".into());
+        assert!(resolve(inputs(home, None, &environment, ConfigLayer::default())).is_err());
+        environment.remove("SESSIONMESH_MAINTENANCE_INTERVAL_SECS");
+        environment.insert("SESSIONMESH_HANDOFFS_TO_KEEP".into(), "0".into());
+        assert!(resolve(inputs(home, None, &environment, ConfigLayer::default())).is_err());
     }
 
     #[test]

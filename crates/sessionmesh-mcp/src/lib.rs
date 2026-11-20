@@ -240,11 +240,9 @@ impl McpServer {
 
     async fn global_session(&self, id: &str) -> Result<StoredGlobalSession, (i64, &'static str)> {
         self.storage
-            .list_global_sessions()
+            .get_global_session(id)
             .await
             .map_err(internal)?
-            .into_iter()
-            .find(|session| session.id == id)
             .ok_or((-32004, "current global session was not found"))
     }
 }
@@ -389,29 +387,11 @@ pub async fn resolve_current_global_id(
         return Some(id);
     }
     let requested = normalize_path(project_root?.to_string_lossy().as_ref());
-    let memberships = storage.list_all_session_members().await.ok()?;
-    let member_to_global = memberships
-        .into_iter()
-        .map(|member| (member.native_session_id, member.global_session_id))
-        .collect::<std::collections::BTreeMap<_, _>>();
     storage
-        .list_canonical_events()
+        .global_for_workspace(&requested)
         .await
-        .ok()?
-        .into_iter()
-        .filter(|event| {
-            event
-                .workspace
-                .as_ref()
-                .and_then(|workspace| workspace.cwd.as_deref())
-                .is_some_and(|cwd| normalize_path(cwd) == requested)
-        })
-        .filter_map(|event| {
-            let global = member_to_global.get(&event.native_session_id)?.clone();
-            Some((event.timestamp.as_str().to_owned(), event.sequence, global))
-        })
-        .max()
-        .map(|(_, _, global)| global)
+        .ok()
+        .flatten()
 }
 
 fn normalize_path(path: &str) -> String {
@@ -522,6 +502,10 @@ mod tests {
             .await
             .unwrap();
 
+        sqlx::query("UPDATE native_events SET canonical_json='unavailable transcript payload'")
+            .execute(storage.pool())
+            .await
+            .unwrap();
         assert_eq!(
             resolve_current_global_id(&storage, Some(PathBuf::from("/workspace/project"))).await,
             Some("gs_workspace".to_owned())

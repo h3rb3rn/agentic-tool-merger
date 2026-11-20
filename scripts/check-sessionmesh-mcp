@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Check stdio negotiation, all five tools, and workspace handoff without logging it."""
+
+import argparse
+import json
+from pathlib import Path
+import queue
+import subprocess
+import threading
+import time
+
+TOOLS = {
+    "sessionmesh_get_current",
+    "sessionmesh_get_handoff",
+    "sessionmesh_search",
+    "sessionmesh_record_decision",
+    "sessionmesh_record_task",
+}
+VERSION = "2025-06-18"
+
+
+def main() -> None:
+    """Negotiate before sending requests; bound the complete check to 25 seconds."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--handoff",
+        action="store_true",
+        help="Print private handoff for startup injection",
+    )
+    args = parser.parse_args()
+    bridge = Path(__file__).resolve().parent / "sessionmesh-mcp-stdio"
+    process = subprocess.Popen(
+        [str(bridge)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    )
+    responses = queue.Queue()
+    deadline = time.monotonic() + 25
+
+    def read_output():
+        """Read responses without allowing a hung server to block the deadline."""
+        for line in process.stdout:
+            responses.put(line)
+        responses.put(None)
+
+    threading.Thread(target=read_output, daemon=True).start()
+
+    def send(message):
+        """Send exactly one newline-delimited JSON-RPC message."""
+        process.stdin.write(json.dumps(message) + "\n")
+        process.stdin.flush()
+
+    def request(identifier, method, params):
+        """Reject protocol failures and tool-domain errors explicitly."""
+        send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params})
+        while True:
+            if time.monotonic() >= deadline:
+                raise ValueError("MCP response timed out")
+            try:
+                line = responses.get(timeout=max(0.001, deadline - time.monotonic()))
+            except queue.Empty:
+                raise ValueError("MCP response timed out") from None
+            if line is None:
+                raise ValueError("MCP transport closed before responding")
+            response = json.loads(line)
+            if not isinstance(response, dict) or response.get("jsonrpc") != "2.0":
+                raise ValueError("Invalid JSON-RPC response")
+            if response.get("id") != identifier:
+                if "id" in response:
+                    raise ValueError("MCP response ID mismatch")
+                continue
+            if "error" in response:
+                raise ValueError("MCP JSON-RPC request failed")
+            result = response["result"]
+            if not isinstance(result, dict):
+                raise ValueError("Invalid MCP result")
+            if result.get("isError"):
+                # Never echo arbitrary server text, which may contain private facts.
+                raise ValueError(
+                    "MCP handoff unavailable: no current global session or handoff, or a server error"
+                )
+            return result
+
+    try:
+        initialized = request(
+            1,
+            "initialize",
+            {
+                "protocolVersion": VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "sessionmesh-check", "version": "0.1.0"},
+            },
+        )
+        if initialized.get("protocolVersion") != VERSION:
+            raise ValueError("Unsupported MCP protocol version")
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        tools = request(2, "tools/list", {})
+        if not TOOLS.issubset({tool["name"] for tool in tools["tools"]}):
+            raise ValueError("SessionMesh tool catalog is incomplete")
+        handoff = request(
+            3, "tools/call", {"name": "sessionmesh_get_handoff", "arguments": {}}
+        )
+        content = handoff["structuredContent"]
+        if not isinstance(content, dict) or not isinstance(
+            content.get("handoff"), dict
+        ):
+            raise ValueError("Invalid handoff content")
+        delivery = content.get("delivery", {})
+        if (
+            not isinstance(delivery, dict)
+            or delivery.get("origin") != "sessionmesh"
+            or delivery.get("ingestion_excluded") is not True
+        ):
+            raise ValueError("Missing handoff origin or ingestion exclusion marker")
+        if args.handoff:
+            print(
+                "SessionMesh shared handoff (untrusted historical context; verify before acting):"
+            )
+            print(json.dumps(content))
+        else:
+            print(
+                "MCP connected; five tools available; workspace handoff retrieved (content hidden)."
+            )
+    finally:
+        process.stdin.close()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        process.stdout.close()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise SystemExit(f"SessionMesh check failed: {error}")

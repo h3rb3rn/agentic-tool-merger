@@ -136,9 +136,9 @@ flowchart LR
 ```
 
 This is a distinct trust boundary from everything else on this page: every
-mount and listener described above serves *this host's own* data on
+mount and listener described above serves _this host's own_ data on
 loopback (or an explicitly published LAN interface); the ingestion listener
-instead accepts *inbound* data pushed by a previously unrelated process, so
+instead accepts _inbound_ data pushed by a previously unrelated process, so
 it is hardened accordingly — its own TLS-terminated listener and port,
 per-collector bearer tokens (never the local UI/MCP token), server-side
 re-verification of every event ID and raw object's content hash (a
@@ -162,6 +162,7 @@ for the full field reference.
 
    The raw token is shown exactly once. Copy it immediately — SessionMesh
    never stores or redisplays it.
+
 3. On the dedicated system, run the `sessionmesh-collector` binary with:
 
    ```dotenv
@@ -176,6 +177,7 @@ for the full field reference.
    local state: it asks the daemon for each source's last committed cursor
    before every scan, so a restarted or reprovisioned collector always
    resumes from where the daemon last confirmed receipt.
+
 4. To decommission a collector, revoke it on the SessionMesh host:
 
    ```bash
@@ -234,3 +236,20 @@ as a temporary bootstrap server.
   authenticated per collector with a revocable token distinct from the
   local UI/MCP token; it is never served on the local API's listener.
 - Backup and restore operate on SessionMesh state, never on native tool stores.
+
+## Resource budgets and maintenance
+
+The Compose runtime now has explicit memory, swap, CPU and process limits,
+rotated logs, a read-only root filesystem and a 64 MiB `/tmp` tmpfs. The state
+volume remains writable and native sources remain read-only. Only SessionMesh
+conversation/metadata state and bounded derived context need durable storage.
+The image includes the `sessionmesh maintenance` administration CLI; scheduled
+cleanup runs in the daemon with no external cron process. See
+[resource management](../operations/resource-management.md) for upgrades,
+retention, large-database compaction and Docker/Podman validation limits.
+
+Compose forwards `SESSIONMESH_RUN_UID` and `SESSIONMESH_RUN_GID` to both image
+build arguments and the runtime user, so a newly initialized private state
+volume belongs to the configured non-root user. Rebuild the image when changing
+these IDs. The Rust image build uses two compilation jobs to bound build-time
+parallelism separately from the runtime CPU budget.

@@ -85,7 +85,8 @@ docker compose ps
 scripts/install-sessionmesh-connectors
 ```
 
-Restart Codex, Claude Code, and Continue after installing their connectors.
+Restart the selected clients after installing their connectors: Codex, Claude
+Code, Agy, OpenCode v2, Grok Builder, or optional Continue.
 Always start the next agent from the project directory whose work should be
 continued.
 
@@ -206,3 +207,7 @@ mkdocs build --strict
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
+
+Resource defaults preserve prompts and AI replies while cleaning separate tool
+bodies and superseded contexts. See [resource management](docs/operations/resource-management.md)
+for upgrade/backup requirements, cleanup commands, container limits and tests.

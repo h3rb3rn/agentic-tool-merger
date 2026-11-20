@@ -47,22 +47,11 @@ flowchart LR
 
 ## Before setup
 
-The current connector installer supports Codex, Claude Code, and Continue. It
-requires these commands on the host:
-
-```bash
-codex --version
-claude --version
-jq --version
-yq --version
-docker --version
-```
-
-Continue must already have a user configuration at:
-
-```text
-~/.continue/config.yaml
-```
+The connector installer supports Codex, Claude Code, Agy, OpenCode v2, and
+Grok Builder (`grok`). It requires Python 3.10 or newer and only the clients you select.
+Docker is needed for the default container bridge; a native MCP binary can
+also be configured. Continue is available as an explicit optional client with
+an existing configuration and jq-style Python `yq`.
 
 The SessionMesh service must be running:
 
@@ -79,7 +68,8 @@ Run the installer as the same desktop user who runs the coding-agent tools:
 
 ```bash
 cd /opt/deployment/agenttool-merger
-scripts/install-sessionmesh-connectors
+scripts/install-sessionmesh-connectors --dry-run codex claude agy opencode grok
+scripts/install-sessionmesh-connectors codex claude agy opencode grok
 ```
 
 The installer:
@@ -87,18 +77,18 @@ The installer:
 - registers the SessionMesh MCP bridge for Codex;
 - registers the same bridge for Claude Code;
 - installs a Claude Code `SessionStart` hook;
-- adds the MCP bridge and a startup rule to Continue;
+- registers the bridge for Agy, OpenCode v2, and Grok Builder;
 - preserves unrelated configuration; and
-- creates backups before changing structured Claude or Continue settings.
+- creates private original backups before changing client configuration.
 
 Expected backup files include:
 
 ```text
 ~/.claude/settings.json.sessionmesh-backup
-~/.continue/config.yaml.sessionmesh-backup
+~/.codex/config.toml.sessionmesh-backup
 ```
 
-Restart Codex, Claude Code, and Continue completely after installation. An
+Restart the selected clients completely after installation. An
 already running tool does not automatically reload a newly registered MCP
 server.
 
@@ -108,13 +98,17 @@ server.
 
 Open the health endpoint:
 
-[http://192.168.155.225:8787/api/v1/health](http://192.168.155.225:8787/api/v1/health)
+[http://127.0.0.1:8787/api/v1/health](http://127.0.0.1:8787/api/v1/health)
 
 Alternatively:
 
 ```bash
-curl -fsS http://192.168.155.225:8787/api/v1/health
+curl -fsS http://127.0.0.1:8787/api/v1/health
 ```
+
+If `.env` overrides `SESSIONMESH_PUBLISH_ADDRESS`, use that address instead
+of `127.0.0.1` for both the health endpoint and Web UI. The audited local setup
+uses `192.168.155.225`; its health endpoint was unavailable during the audit.
 
 ### Check Codex
 
@@ -136,7 +130,25 @@ claude mcp get sessionmesh
 
 The result should show `Connected` and user scope.
 
+### Check Agy, OpenCode, and Grok Builder
+
+```bash
+agy mcp list
+opencode mcp list
+grok mcp doctor sessionmesh
+```
+
+OpenCode's binary may be at `~/.opencode/bin/opencode`. Agy and Grok MCP
+registration makes the tools available; request `sessionmesh_get_handoff` in
+the first prompt to retrieve context.
+
 ### Test the complete handoff path
+
+First check without printing private project content:
+
+```bash
+/opt/deployment/agenttool-merger/scripts/check-sessionmesh-mcp
+```
 
 Run this command from the project that should be continued:
 
@@ -158,7 +170,7 @@ so do not paste it into public issues or logs.
 
 Open:
 
-[http://192.168.155.225:8787](http://192.168.155.225:8787)
+[http://127.0.0.1:8787](http://127.0.0.1:8787)
 
 The Web UI requests the local API token once per browser tab. Read it from the
 running container:
@@ -175,6 +187,19 @@ current tab's `sessionStorage`.
 
     Treat the API token like a password. Do not commit it, place it in `.env`,
     publish it in documentation, or send it in chat.
+
+### Read session messages in the Web UI
+
+Select a native session, then choose **Show timeline content** and confirm
+**Show content now** to load prompts and AI replies. By default the timeline
+shows metadata; message text and source paths require explicit disclosure.
+
+Use **Next events** and **Previous events** to navigate chronological pages of
+up to 200 events. Live replay preserves a historical page's boundary instead
+of expanding it with the rest of the archive. A full live page offers
+**Refresh timeline for new events** when more activity arrives. Content loads
+through at most four concurrent detail requests. Individual failures show a
+visible error and **Retry**; changing pages cancels obsolete requests.
 
 ## Normal daily use
 
@@ -261,20 +286,12 @@ The percentage is confidence evidence, not a guarantee. Linking references the
 two native sessions in one global context; it does not rewrite either
 transcript.
 
-## OpenCode and Agy limitation
+## Import coverage
 
-SessionMesh currently imports OpenCode sessions and Agy prompt history, but it
-does not yet install an automatic outbound handoff connector for either tool.
-Use the manual fallback:
-
-```bash
-cd /path/to/your/project
-/opt/deployment/agenttool-merger/scripts/sessionmesh-session-start
-```
-
-Copy the resulting handoff into the first message of the new OpenCode or Agy
-session. Never publish that output because it may contain private project
-context.
+MCP delivery and transcript import are separate capabilities. OpenCode sessions
+and Agy prompt history can be imported. Complete Agy assistant trajectories
+and a Grok transcript importer are not implemented by this connector setup.
+Grok can still retrieve context produced from supported sources.
 
 ## Troubleshooting
 
@@ -314,3 +331,12 @@ cd /path/to/your/project
 
 If the service is healthy but the command returns no handoff, verify in the Web
 UI that the native session was imported and linked to a global context.
+
+### The configured container does not exist
+
+Run `docker compose ps -a` in the repository and locate the existing persistent
+state before restoring the service. The bridge does not start a daemon. Set
+`SESSIONMESH_CONTAINER` if the service uses a different container name, or
+configure `SESSIONMESH_MCP_BINARY` and `SESSIONMESH_HOME` for native execution.
+See [transport configuration and the local audit](../integrations/automatic-delivery.md).
+A client restart alone cannot repair an absent service or missing state.

@@ -65,22 +65,40 @@ new data since the last pass.
 A non-loopback bind address or remote model endpoint requires
 `allow_network = true`. Model endpoints accept only HTTP or HTTPS.
 
+## Resource management
+
+| Setting                     | Environment                             | Default |
+| --------------------------- | --------------------------------------- | ------- |
+| `conversation_only`         | `SESSIONMESH_CONVERSATION_ONLY`         | `true`  |
+| `maintenance_interval_secs` | `SESSIONMESH_MAINTENANCE_INTERVAL_SECS` | `3600`  |
+| `handoffs_to_keep`          | `SESSIONMESH_HANDOFFS_TO_KEEP`          | `1`     |
+
+Cleanup intervals must be 60–86,400 seconds; retained handoffs must be 1–100
+per global session. These values follow the same layered precedence and
+validation as other settings. Conversation mode preserves prompts and AI
+replies, while deleting separate tool bodies. Configure `false` before upgrade
+if full tool history is required. See
+[retention and resource controls](../operations/resource-management.md).
+
+Compose-only `SESSIONMESH_MEMORY_LIMIT` (default `1g`) and `SESSIONMESH_CPUS`
+(default `1.0`) configure cgroups, not Rust application configuration.
+
 ## Network ingestion (remote collectors)
 
-| Setting                        | Default    | Reason                              |
-| ------------------------------- | ---------- | ------------------------------------ |
-| `network_ingestion_enabled`     | `false`    | Disabled unless explicitly opted in  |
-| `ingest_bind_address`           | `0.0.0.0`  | Meaningless without remote reach     |
-| `ingest_port`                   | `8788`     | Distinct from the local API port     |
-| `ingest_tls_cert_path`          | *(none)*   | Required when enabled                |
-| `ingest_tls_key_path`           | *(none)*   | Required when enabled                |
-| `ingest_max_batch_bytes`        | `10485760` | Bound one collector batch (10 MiB)   |
-| `ingest_max_events_per_batch`   | `5000`     | Bound events accepted in one batch   |
-| `ingest_rate_limit_per_minute`  | `60`       | Per-collector request budget; `0` disables limiting |
+| Setting                        | Default    | Reason                                              |
+| ------------------------------ | ---------- | --------------------------------------------------- |
+| `network_ingestion_enabled`    | `false`    | Disabled unless explicitly opted in                 |
+| `ingest_bind_address`          | `0.0.0.0`  | Meaningless without remote reach                    |
+| `ingest_port`                  | `8788`     | Distinct from the local API port                    |
+| `ingest_tls_cert_path`         | _(none)_   | Required when enabled                               |
+| `ingest_tls_key_path`          | _(none)_   | Required when enabled                               |
+| `ingest_max_batch_bytes`       | `10485760` | Bound one collector batch (10 MiB)                  |
+| `ingest_max_events_per_batch`  | `5000`     | Bound events accepted in one batch                  |
+| `ingest_rate_limit_per_minute` | `60`       | Per-collector request budget; `0` disables limiting |
 
 This is a distinct trust boundary from everything else in this document:
 every other setting governs the loopback-reachable local API or outbound
-model calls, while `network_ingestion_enabled` accepts *inbound* data from
+model calls, while `network_ingestion_enabled` accepts _inbound_ data from
 previously unrelated processes — a [collector](../architecture/deployment.md)
 running on a dedicated system SessionMesh cannot mount a local filesystem
 from. It is served on its own TLS-terminated listener
@@ -92,30 +110,30 @@ refuses to start otherwise.
 
 ## Environment variables
 
-| Variable                            | Field                       |
-| ----------------------------------- | --------------------------- |
-| `SESSIONMESH_HOME`                  | State home                  |
-| `SESSIONMESH_BIND_ADDRESS`          | API bind address            |
-| `SESSIONMESH_PORT`                  | API port                    |
-| `SESSIONMESH_ALLOW_NETWORK`         | Network opt-in              |
-| `SESSIONMESH_DATABASE_PATH`         | SQLite path                 |
-| `SESSIONMESH_BLOB_STORE_PATH`       | Blob-store path             |
-| `SESSIONMESH_WATCH_DEBOUNCE_MS`     | Watch debounce              |
-| `SESSIONMESH_RECONCILE_INTERVAL_MS` | Reconciliation interval     |
-| `SESSIONMESH_REDACTION_ENABLED`     | Redaction toggle            |
-| `SESSIONMESH_EMBEDDING_ENDPOINT`    | Embedding endpoint          |
-| `SESSIONMESH_LLM_ENDPOINT`          | Extraction/handoff endpoint |
-| `SESSIONMESH_MODEL`                 | Model identifier            |
-| `SESSIONMESH_TOKEN_BUDGET`          | Handoff budget              |
-| `SESSIONMESH_CORRELATION_THRESHOLD` | Automatic-link threshold    |
-| `SESSIONMESH_NETWORK_INGESTION_ENABLED` | Network ingestion opt-in |
-| `SESSIONMESH_INGEST_BIND_ADDRESS`   | Ingestion listener address  |
-| `SESSIONMESH_INGEST_PORT`           | Ingestion listener port     |
-| `SESSIONMESH_INGEST_TLS_CERT_PATH`  | Ingestion TLS certificate   |
-| `SESSIONMESH_INGEST_TLS_KEY_PATH`   | Ingestion TLS private key   |
-| `SESSIONMESH_INGEST_MAX_BATCH_BYTES` | Ingestion batch size limit |
-| `SESSIONMESH_INGEST_MAX_EVENTS_PER_BATCH` | Ingestion batch event-count limit |
-| `SESSIONMESH_INGEST_RATE_LIMIT_PER_MINUTE` | Per-collector rate limit |
+| Variable                                   | Field                             |
+| ------------------------------------------ | --------------------------------- |
+| `SESSIONMESH_HOME`                         | State home                        |
+| `SESSIONMESH_BIND_ADDRESS`                 | API bind address                  |
+| `SESSIONMESH_PORT`                         | API port                          |
+| `SESSIONMESH_ALLOW_NETWORK`                | Network opt-in                    |
+| `SESSIONMESH_DATABASE_PATH`                | SQLite path                       |
+| `SESSIONMESH_BLOB_STORE_PATH`              | Blob-store path                   |
+| `SESSIONMESH_WATCH_DEBOUNCE_MS`            | Watch debounce                    |
+| `SESSIONMESH_RECONCILE_INTERVAL_MS`        | Reconciliation interval           |
+| `SESSIONMESH_REDACTION_ENABLED`            | Redaction toggle                  |
+| `SESSIONMESH_EMBEDDING_ENDPOINT`           | Embedding endpoint                |
+| `SESSIONMESH_LLM_ENDPOINT`                 | Extraction/handoff endpoint       |
+| `SESSIONMESH_MODEL`                        | Model identifier                  |
+| `SESSIONMESH_TOKEN_BUDGET`                 | Handoff budget                    |
+| `SESSIONMESH_CORRELATION_THRESHOLD`        | Automatic-link threshold          |
+| `SESSIONMESH_NETWORK_INGESTION_ENABLED`    | Network ingestion opt-in          |
+| `SESSIONMESH_INGEST_BIND_ADDRESS`          | Ingestion listener address        |
+| `SESSIONMESH_INGEST_PORT`                  | Ingestion listener port           |
+| `SESSIONMESH_INGEST_TLS_CERT_PATH`         | Ingestion TLS certificate         |
+| `SESSIONMESH_INGEST_TLS_KEY_PATH`          | Ingestion TLS private key         |
+| `SESSIONMESH_INGEST_MAX_BATCH_BYTES`       | Ingestion batch size limit        |
+| `SESSIONMESH_INGEST_MAX_EVENTS_PER_BATCH`  | Ingestion batch event-count limit |
+| `SESSIONMESH_INGEST_RATE_LIMIT_PER_MINUTE` | Per-collector rate limit          |
 
 ## Path expansion
 
