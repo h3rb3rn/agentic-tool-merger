@@ -7,6 +7,15 @@ changes to SessionMesh are recorded here.
 
 ### Resource management
 
+- Bounded derived handoff prose with explicit UTF-8-safe excerpts, fixing default
+  budget failures on long real-world prompts and recorded tasks. Full source
+  messages, observations and provenance remain intact.
+
+- Fixed MCP startup contention observed during live initial import. Current
+  databases validate schema/projection readiness through WAL reads without
+  reissuing migration/journal writes; archive scanning and reconciliation now
+  progress independently.
+
 - Updated compatible transitive runtime dependencies to Seroval 1.8.2 and
   seroval-plugins 1.8.0. The publication-time production dependency audit reports
   no known vulnerabilities; outstanding development/build-tool advisories are

@@ -252,6 +252,16 @@ pub async fn generate(
             apply_suggestions(&mut facts, suggestions);
         }
     }
+    // Excerpt derived prose while keeping source events and recorded observations complete.
+    for value in facts
+        .decisions
+        .iter_mut()
+        .chain(facts.completed.iter_mut())
+        .chain(facts.open_tasks.iter_mut())
+    {
+        bound_excerpt(value);
+    }
+    bound_excerpt(&mut facts.next_action);
     let completion = completion(&facts);
     let mut handoff = Handoff {
         schema_version: HANDOFF_SCHEMA_VERSION.to_owned(),
@@ -501,6 +511,20 @@ fn completion(facts: &ExtractedFacts) -> u8 {
     }
 }
 
+/// Prevents large prompts and recorded tasks from overflowing mandatory context.
+/// The ellipsis identifies an excerpt; provenance still locates the complete source.
+fn bound_excerpt(value: &mut String) {
+    const MAX_BYTES: usize = 2048;
+    if value.len() <= MAX_BYTES {
+        return;
+    }
+    let mut end = MAX_BYTES - '…'.len_utf8();
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    *value = format!("{}…", &value[..end]);
+}
+
 fn enforce_budget(handoff: &mut Handoff, token_budget: usize) -> Result<(), HandoffError> {
     if token_budget < 64 {
         return Err(HandoffError::BudgetTooSmall);
@@ -713,6 +737,37 @@ mod tests {
         )];
         let handoff = generate(input(&events, 2_000), None).await.unwrap();
         assert_eq!(handoff.open_tasks, ["Use [REDACTED]"]);
+    }
+
+    #[tokio::test]
+    async fn long_prompts_are_excerpted_only_in_derived_context() {
+        let original = "Detailed requirement with Unicode 🌍 and source code. ".repeat(2000);
+        let events = vec![event(
+            1,
+            EventKind::UserMessage,
+            BTreeMap::from([("text".into(), original.clone().into())]),
+        )];
+        let handoff = generate(input(&events, 4000), None).await.unwrap();
+        assert!(approximate_tokens(&handoff) <= 4000);
+        assert!(handoff.next_action.ends_with('…'));
+        assert!(handoff.open_tasks[0].ends_with('…'));
+        assert!(
+            handoff
+                .provenance
+                .iter()
+                .any(|source| source.event_id == events[0].event_id.as_str())
+        );
+        assert_eq!(events[0].payload["text"], original);
+        let records = vec![RecordedFact {
+            provenance_id: "record:task".into(),
+            kind: "task".into(),
+            content: original.clone(),
+        }];
+        let mut with_records = input(&events, 4000);
+        with_records.records = &records;
+        let handoff = generate(with_records, None).await.unwrap();
+        assert!(approximate_tokens(&handoff) <= 4000);
+        assert_eq!(records[0].content, original);
     }
 
     #[tokio::test]

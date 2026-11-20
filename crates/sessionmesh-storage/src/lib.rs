@@ -550,6 +550,29 @@ impl Storage {
             set_directory_permissions(parent).await?;
         }
 
+        if conversation_only.is_none() && tokio::fs::try_exists(database_path).await? {
+            // Readers inherit WAL instead of reissuing journal/auto-vacuum changes.
+            let options = SqliteConnectOptions::new()
+                .filename(database_path)
+                .foreign_keys(true)
+                .synchronous(SqliteSynchronous::Normal)
+                .busy_timeout(Duration::from_secs(5))
+                .pragma("cache_size", "-8192")
+                .pragma("journal_size_limit", "16777216");
+            let pool = SqlitePoolOptions::new()
+                .max_connections(3)
+                .connect_with(options)
+                .await?;
+            set_file_permissions(database_path).await?;
+            if Self::schema_is_current(&pool).await? {
+                return Ok(Self {
+                    pool,
+                    blobs: BlobStore::open(blob_root).await?,
+                });
+            }
+            pool.close().await;
+        }
+
         let options = SqliteConnectOptions::from_str(&format!(
             "sqlite://{}",
             database_path.to_string_lossy()
@@ -575,6 +598,40 @@ impl Storage {
         }
         storage.backfill_overviews().await?;
         Ok(storage)
+    }
+
+    /// Validates migration checksums and projection readiness using only WAL reads.
+    async fn schema_is_current(pool: &SqlitePool) -> Result<bool, StorageError> {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if exists == 0 {
+            return Ok(false);
+        }
+        let applied =
+            sqlx::query("SELECT version,checksum,success FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(pool)
+                .await?;
+        if applied.len() != MIGRATOR.iter().count() {
+            return Ok(false);
+        }
+        for (row, migration) in applied.iter().zip(MIGRATOR.iter()) {
+            let checksum: Vec<u8> = row.get("checksum");
+            if row.get::<i64, _>("version") != migration.version
+                || !row.get::<bool, _>("success")
+                || checksum.as_slice() != migration.checksum.as_ref()
+            {
+                return Ok(false);
+            }
+        }
+        let ready: Option<i64> = sqlx::query_scalar(
+            "SELECT value FROM storage_settings WHERE key='overview_backfill_complete'",
+        )
+        .fetch_optional(pool)
+        .await?;
+        Ok(ready == Some(1))
     }
 
     /// Returns the pool for read-only diagnostics and later repository modules.
@@ -2085,6 +2142,28 @@ mod tests {
             partial_line: Vec::new(),
             updated_at: "2026-07-20T14:31:24Z".to_owned(),
         }
+    }
+
+    #[tokio::test]
+    async fn opening_current_storage_does_not_request_a_write_lock() {
+        let (directory, storage) = test_storage().await;
+        storage.store_event(&event(0)).await.unwrap();
+        let transaction = storage.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let reader = tokio::time::timeout(
+            Duration::from_millis(500),
+            Storage::open(
+                directory.path().join("sessionmesh.db"),
+                directory.path().join("blobs"),
+            ),
+        )
+        .await;
+        assert!(
+            reader.is_ok(),
+            "opening an already migrated WAL database must not wait for a writer"
+        );
+        let reader = reader.unwrap().unwrap();
+        assert_eq!(reader.event_count().await.unwrap(), 1);
+        transaction.rollback().await.unwrap();
     }
 
     #[tokio::test]

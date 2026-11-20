@@ -556,3 +556,23 @@ or reclassified as a passing full dependency audit.
 The previously absent service/image/state volume are being recreated under the
 user's startup authorization, using read-only native sources. Live deployment
 verification is recorded after startup below.
+
+Live startup follow-up: the first container reached healthy status with the
+configured limits, user-only state, and read-only native mount, but the MCP
+probe reproduced `database is locked` while ingestion held a writer. The cause
+was schema/journal initialization on every ordinary storage open. A focused
+writer-held regression timed out before the fix and now passes: current-schema
+readers validate checksums/readiness through WAL without requesting a write
+lock. Explicit migrations/policy writes still use their existing validation.
+The archive scanner and reconciler now run independently so initial import
+does not postpone all handoff generation. All 157 Rust tests/doc tests and
+strict Clippy pass. A follow-up image build and live verification are underway;
+no state volume is removed during recreation.
+
+The real archive additionally reproduced `BudgetTooSmall` for a long prompt
+copied into mandatory task/next-action fields. The regression failed with the
+original budget error, then passed after adding bounded UTF-8-safe excerpts to
+derived prose. Full messages and recorded observations are unchanged. All 158
+Rust tests/doc tests and strict Clippy pass with both startup fixes. The image
+is being rebuilt again to include this real-data context case; the existing
+state volume and cursors are preserved across recreation.

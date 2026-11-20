@@ -76,3 +76,8 @@ A cleanup revision causes automatic regeneration after tool history is removed,
 without waiting for another message. See
 [ADR-011](../adr/011-conversation-retention-and-bounded-resources.md) and
 [resource management](../operations/resource-management.md).
+
+Derived prose fields use UTF-8-safe, ellipsis-marked excerpts of at most
+2,048 bytes. This prevents one long prompt or recorded task from overflowing
+the mandatory handoff layer. Excerpting applies to the generated handoff only;
+permanent messages, observations and source references stay complete.

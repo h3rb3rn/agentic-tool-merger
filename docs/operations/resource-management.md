@@ -204,3 +204,31 @@ upgrade a consistent backup on a larger disk; do not try to make room by
 removing active WAL files. Backfill reads individual canonical payloads rather
 than collecting 128 large legacy tool dumps into memory, and skips rebuilding
 their FTS content when conversation retention is enabled.
+
+## MCP startup while an initial import is running
+
+The live deployment exposed a SQLite startup contention path: every MCP process
+reissued journal/auto-vacuum settings and migration-table DDL when opening an
+already current database. During a long import transaction, that could close
+stdio with `database is locked` before protocol negotiation.
+
+An ordinary `Storage::open` now verifies applied migration versions/checksums
+and projection readiness with WAL reads. A current database inherits its journal
+mode and opens without migration or journal-setting writes. New, incomplete or
+outdated databases still use the migration path; schema validation is not
+skipped. Explicit policy/configuration opens retain their controlled write
+semantics. A regression test holds an immediate writer transaction and requires
+a second current-schema reader to open within 500 ms; the old code timed out.
+
+The scanner and reconciler also run as independent futures. Initial discovery
+and ingestion can therefore continue while already imported sessions receive
+handoffs, without waiting for a complete archive scan to return. No busy-timeout
+increase or startup retry loop was added.
+
+Long real-world prompts also exposed a mandatory-layer budget failure: the full
+latest prompt was copied into both a task and `next_action`, so even dropping
+optional fields could not fit the default handoff budget. Derived decisions,
+completion/task prose and next actions now use explicit UTF-8-safe excerpts of
+at most 2,048 bytes with an ellipsis. Original canonical messages, raw evidence,
+and typed observation content are unchanged and remain available through their
+provenance. The regression covers long Unicode prompts and recorded tasks.

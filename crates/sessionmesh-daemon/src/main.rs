@@ -198,22 +198,26 @@ async fn run_ingestion(
     let mut reconciler = Reconciler::default();
     let mut codex_memory = ScanMemory::default();
     let mut external_memory = ScanMemory::default();
-    loop {
-        tokio::select! {
-            _ = scan_interval.tick() => {
-                scan_codex_once(&state, &discovery_input, &mut codex_memory).await;
-                let external_sources = external_sources(&profile_root, &original_profile_root);
-                let opencode_source = discover_opencode(&profile_root, &original_profile_root);
-                scan_external_once(&state, &external_sources, &mut external_memory).await;
-                scan_opencode_once(&state, opencode_source.as_ref()).await;
-            }
-            _ = reconcile_interval.tick() => {
-                if let Err(error) = reconciler.reconcile(&state, correlation_threshold).await {
-                    eprintln!("SessionMesh reconciliation failed: {error}");
-                }
+    // Independent futures keep first-import I/O from starving handoff generation.
+    let scanning = async {
+        loop {
+            scan_interval.tick().await;
+            scan_codex_once(&state, &discovery_input, &mut codex_memory).await;
+            let external_sources = external_sources(&profile_root, &original_profile_root);
+            let opencode_source = discover_opencode(&profile_root, &original_profile_root);
+            scan_external_once(&state, &external_sources, &mut external_memory).await;
+            scan_opencode_once(&state, opencode_source.as_ref()).await;
+        }
+    };
+    let reconciliation = async {
+        loop {
+            reconcile_interval.tick().await;
+            if let Err(error) = reconciler.reconcile(&state, correlation_threshold).await {
+                eprintln!("SessionMesh reconciliation failed: {error}");
             }
         }
-    }
+    };
+    tokio::join!(scanning, reconciliation);
 }
 
 /// Remembers each scanned file's size and modification time so unchanged
