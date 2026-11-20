@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "sessionmesh": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/sessionmesh-mcp-stdio"
+    }
+  }
+}

@@ -3147,4 +3147,88 @@ mod tests {
         assert_eq!(journal_mode.to_lowercase(), "wal");
         assert_eq!(foreign_keys, 1);
     }
+
+    #[tokio::test]
+    async fn recent_conversation_returns_newest_messages_chronologically_with_truncation() {
+        let (_directory, storage) = test_storage().await;
+        for sequence in 0..4 {
+            storage.store_event(&event(sequence)).await.unwrap();
+        }
+        storage
+            .store_event(&with_kind(event(4), EventKind::FileRead))
+            .await
+            .unwrap();
+        let (events, truncated) = storage
+            .recent_conversation("native-session", 2)
+            .await
+            .unwrap();
+        let sequences: Vec<_> = events.iter().map(|event| event.sequence).collect();
+        assert_eq!(
+            sequences,
+            [2, 3],
+            "file reads are not conversation messages"
+        );
+        assert!(truncated);
+        let (all, truncated) = storage
+            .recent_conversation("native-session", 10)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 4);
+        assert!(!truncated);
+        assert!(
+            storage
+                .recent_conversation("missing", 5)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_native_sessions_order_by_latest_event_and_filter_by_family() {
+        let (_directory, storage) = test_storage().await;
+        storage.store_event(&event(0)).await.unwrap();
+        let newer = CanonicalEvent::from_draft(EventDraft {
+            tool: ToolIdentity {
+                family: "opencode".to_owned(),
+                surface: "cli".to_owned(),
+                profile: "default".to_owned(),
+            },
+            native_session_id: "newer".to_owned(),
+            sequence: 0,
+            timestamp: EventTimestamp::parse("2026-08-01T00:00:00Z").unwrap(),
+            timestamp_precision: TimestampPrecision::Second,
+            kind: EventKind::UserMessage,
+            workspace: None,
+            payload: BTreeMap::from([("text".to_owned(), "later".into())]),
+            provenance: EventProvenance {
+                source_path: "/sources/opencode.db".to_owned(),
+                original_path: None,
+                source_offset: 0,
+                source_generation: "g".to_owned(),
+                adapter_version: "0.1.0".to_owned(),
+                ingestion_sequence: 0,
+                ordering_confidence: Some(1.0),
+            },
+        })
+        .unwrap();
+        storage.store_event(&newer).await.unwrap();
+        // Several importers never set session start/end times; activity must still order them.
+        sqlx::query("UPDATE native_sessions SET started_at=NULL, ended_at=NULL")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let all = storage.recent_native_sessions(0, 10, None).await.unwrap();
+        let ids: Vec<_> = all.iter().map(|(session, _)| session.id.as_str()).collect();
+        assert_eq!(ids, ["newer", "native-session"]);
+        assert_eq!(all[0].1.as_deref(), Some("2026-08-01T00:00:00Z"));
+        let page = storage.recent_native_sessions(1, 1, None).await.unwrap();
+        assert_eq!(page[0].0.id, "native-session");
+        let codex = storage
+            .recent_native_sessions(0, 10, Some("codex"))
+            .await
+            .unwrap();
+        assert_eq!(codex.len(), 1);
+    }
 }

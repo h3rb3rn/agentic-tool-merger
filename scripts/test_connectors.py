@@ -110,7 +110,7 @@ for line in sys.stdin:
   continue
  if r['method']=='initialize': result={'protocolVersion':'2025-06-18'}
  elif not initialized: sys.exit(9)
- elif r['method']=='tools/list': result={'tools':[{'name':n} for n in ['sessionmesh_get_current','sessionmesh_get_handoff','sessionmesh_search','sessionmesh_record_decision','sessionmesh_record_task']]}
+ elif r['method']=='tools/list': result={'tools':[{'name':n} for n in ['sessionmesh_get_current','sessionmesh_get_handoff','sessionmesh_search','sessionmesh_list_sessions','sessionmesh_get_session','sessionmesh_record_decision','sessionmesh_record_task']]}
  else: result={'structuredContent':{'handoff':{'objective':'PRIVATE_SENTINEL'},'delivery':{'origin':'sessionmesh','ingestion_excluded':True}}}
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
 """)
@@ -171,7 +171,7 @@ for line in sys.stdin:
  r=json.loads(line)
  if 'id' not in r: continue
  if r['method']=='initialize': result={'protocolVersion':'2025-06-18'}
- elif r['method']=='tools/list': result={'tools':[{'name':n} for n in ['sessionmesh_get_current','sessionmesh_get_handoff','sessionmesh_search','sessionmesh_record_decision','sessionmesh_record_task']]}
+ elif r['method']=='tools/list': result={'tools':[{'name':n} for n in ['sessionmesh_get_current','sessionmesh_get_handoff','sessionmesh_search','sessionmesh_list_sessions','sessionmesh_get_session','sessionmesh_record_decision','sessionmesh_record_task']]}
  else: result={'isError':True,'content':[{'type':'text','text':'no current global session'}]}
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
 """)

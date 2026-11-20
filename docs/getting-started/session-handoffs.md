@@ -135,7 +135,7 @@ requires separately authorized MCP writes.
 
 ## Connection checks and manual delivery
 
-From the project directory, check negotiation, the five tools and workspace
+From the project directory, check negotiation, the seven tools and workspace
 handoff without printing private context:
 
 ```bash
