@@ -640,3 +640,33 @@ workspace handoff check also pass. The existing state volume is preserved.
 The changes are published on `fix/gui-timeline-loading` without merging main.
 SessionMesh decision recording was attempted but the connected MCP process
 refused writes; this repository ledger preserves the confirmed result.
+
+## GUI authentication recovery — 2026-11-20
+
+The user reported `Sessions are temporarily unavailable` after deployment.
+The running container is healthy. A current-token probe returns HTTP 200 with
+200 session summaries; an invalid token returns HTTP 401 `unauthorized`.
+The browser previously discarded HTTP status and rendered the same generic
+message for invalid credentials and server/network outages. This reproduces
+the reported message but does not establish which token the user's tab holds.
+
+Two focused tests failed before implementation: HTTP status/callback behavior
+and replacing a rejected saved token in the full application. The UI now clears
+the rejected token and query cache, explains the authentication failure, shows
+the current-token retrieval command and permits reconnection. A token-specific
+guard ignores late failures from an older client. Non-401 failures preserve the
+token. An additional test covers stream rejection without an authentication
+retry loop. The exposed SessionMesh MCP transport was closed at session start;
+verified state and changes are persisted in this ledger.
+
+Validation passes: twenty web tests, twelve repository/schema/security tests,
+formatting, lint, TypeScript, production build and strict MkDocs. The deployed
+image is
+`sha256:0d431135e26d59d3845ca8c79afb70c3a8d575d3832af1caef022d3f54060bd3`;
+Compose and HTTP health are healthy. A real Chromium test seeded a rejected
+saved token, verified automatic login recovery and cache/token removal,
+reconnected using the current token, and verified 200 session buttons. Manual
+token reset also passes. An intercepted HTTP 500 preserved the token, displayed
+its status and recovered through Retry after the interception was removed.
+There were zero JavaScript errors. Credentials/session text were not logged.
+Changes are published on `fix/gui-auth-recovery`; the state volume is preserved.

@@ -55,3 +55,36 @@ describe("event detail loading", () => {
     expect(fetch).toHaveBeenCalledTimes(4);
   });
 });
+
+describe("authentication errors", () => {
+  it("preserves HTTP status and requests reauthentication only for 401", async () => {
+    const unauthorized = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response('{"code":"unauthorized"}', { status: 401 }),
+        )
+        .mockResolvedValueOnce(new Response("{}", { status: 500 })),
+    );
+    const api = createApiClient("old-token", unauthorized);
+    await expect(api.listSessions()).rejects.toMatchObject({ status: 401 });
+    expect(unauthorized).toHaveBeenCalledTimes(1);
+    await expect(api.listSessions()).rejects.toMatchObject({ status: 500 });
+    expect(unauthorized).toHaveBeenCalledTimes(1);
+  });
+});
+
+it("returns a rejected stream to authentication without a reconnect loop", async () => {
+  const unauthorized = vi.fn();
+  const fetch = vi.fn().mockResolvedValue(new Response("{}", { status: 401 }));
+  vi.stubGlobal("fetch", fetch);
+  const stop = createApiClient("old-token", unauthorized).subscribe(
+    undefined,
+    vi.fn(),
+  );
+  await waitFor(() => expect(unauthorized).toHaveBeenCalledTimes(1));
+  expect(fetch).toHaveBeenCalledTimes(1);
+  stop();
+});

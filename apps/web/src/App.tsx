@@ -14,6 +14,7 @@ import {
   type Page,
   type SessionMeshClient,
   createApiClient,
+  ApiError,
 } from "./api";
 import { eventLabel, mergeChronologicalEvents } from "./timeline";
 
@@ -31,22 +32,48 @@ export function App({ client }: AppProps) {
   const [token, setToken] = useState(
     () => sessionStorage.getItem("api-token") ?? "",
   );
+  const [authMessage, setAuthMessage] = useState("");
+  const disconnect = (message = "") => {
+    sessionStorage.removeItem("api-token");
+    queryClient.clear();
+    setAuthMessage(message);
+    setToken("");
+  };
   const activeClient = useMemo(
-    () => client ?? (token ? createApiClient(token) : undefined),
-    [client, token],
+    () =>
+      client ??
+      (token
+        ? createApiClient(token, () => {
+            // A late rejection from the old client must not invalidate a replacement token.
+            if (sessionStorage.getItem("api-token") !== token) return;
+            sessionStorage.removeItem("api-token");
+            queryClient.clear();
+            setAuthMessage(
+              "Your API token is invalid. Enter the current token from the running container.",
+            );
+            setToken("");
+          })
+        : undefined),
+    [client, token, queryClient],
   );
 
   if (!activeClient) {
-    return <TokenSetup onSave={setToken} />;
+    return <TokenSetup onSave={setToken} message={authMessage} />;
   }
   return (
     <QueryClientProvider client={queryClient}>
-      <Timeline client={activeClient} />
+      <Timeline client={activeClient} onDisconnect={() => disconnect()} />
     </QueryClientProvider>
   );
 }
 
-function TokenSetup({ onSave }: { onSave: (token: string) => void }) {
+function TokenSetup({
+  onSave,
+  message,
+}: {
+  onSave: (token: string) => void;
+  message?: string;
+}) {
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -61,6 +88,14 @@ function TokenSetup({ onSave }: { onSave: (token: string) => void }) {
       <p className="eyebrow">LOCAL AUTHENTICATION</p>
       <h1>SessionMesh</h1>
       <p>Enter the token from your SessionMesh home. It remains in this tab.</p>
+      {message && <p role="alert">{message}</p>}
+      <p>Read the current token on the host:</p>
+      <pre>
+        <code>
+          docker exec agenttool-merger-sessionmesh-1 cat
+          /var/lib/sessionmesh/api-token
+        </code>
+      </pre>
       <form onSubmit={submit}>
         <label htmlFor="token">Local API token</label>
         <input
@@ -145,7 +180,13 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1_000_000).toFixed(1)} MB`;
 }
 
-function Timeline({ client }: { client: SessionMeshClient }) {
+function Timeline({
+  client,
+  onDisconnect,
+}: {
+  client: SessionMeshClient;
+  onDisconnect: () => void;
+}) {
   const cache = useQueryClient();
   const [selectedId, setSelectedId] = useState(
     () => new URLSearchParams(window.location.search).get("session") ?? "",
@@ -250,6 +291,9 @@ function Timeline({ client }: { client: SessionMeshClient }) {
   return (
     <main className="app-shell">
       <header>
+        <button type="button" onClick={onDisconnect}>
+          Change API token
+        </button>
         <div>
           <p className="eyebrow">LOCAL-FIRST SESSION OBSERVABILITY</p>
           <h1>SessionMesh</h1>
@@ -309,7 +353,11 @@ function Timeline({ client }: { client: SessionMeshClient }) {
           {sessions.isPending && <p role="status">Loading sessions…</p>}
           {sessions.isError && (
             <ErrorState
-              message="Sessions are temporarily unavailable"
+              message={
+                sessions.error instanceof ApiError
+                  ? `Sessions are temporarily unavailable (HTTP ${sessions.error.status})`
+                  : "Sessions are temporarily unavailable. Check your connection and retry."
+              }
               retry={sessions.refetch}
             />
           )}
